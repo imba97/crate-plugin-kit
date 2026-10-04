@@ -1,6 +1,6 @@
 [package]
 name = "crate-plugin-kit"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.88"
 description = "A cargo-based plugin system: install cdylib plugins from crates.io and load them at runtime."
