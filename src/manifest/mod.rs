@@ -28,12 +28,21 @@
 //! build-host install this crate uses `cargo metadata` to locate the crate source dir
 //! and copies that file verbatim into the install dir, so there is a single source of
 //! truth and no extra exported symbol is needed.
+//!
+//! # Layout
+//!
+//! [`PluginManifest`] and its file handling are here; the section types it is made of
+//! are in `sections`.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{KitError, KitResult};
+
+mod sections;
+
+pub use sections::{LibSection, PluginSection};
 
 /// A parsed manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,52 +56,6 @@ pub struct PluginManifest {
 
     /// Any other sections belonging to the host (`[detect]` and the like), preserved
     /// verbatim.
-    #[serde(flatten)]
-    pub extra: toml::Table,
-}
-
-/// The `[plugin]` section of a manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginSection {
-    /// Plugin name. This is the authoritative source — after loading, a host should
-    /// check that the plugin's self-declared name matches it.
-    pub name: String,
-
-    /// Plugin version.
-    pub version: String,
-
-    /// Cross-boundary ABI version. For the host's own use; this crate only moves it
-    /// around.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abi: Option<u32>,
-
-    /// Ecosystem family. For the host's own use; this crate only moves it around.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family: Option<String>,
-
-    /// Plugin repository URL. Needed when downloading a prebuilt, to build the release
-    /// URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-
-    /// Human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-
-    /// Any other keys, preserved verbatim.
-    #[serde(flatten)]
-    pub extra: toml::Table,
-}
-
-/// The `[lib]` section of a manifest.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LibSection {
-    /// cdylib file name stem (platform-independent, without the `lib` prefix and the
-    /// extension).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stem: Option<String>,
-
-    /// Any other keys, preserved verbatim.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
@@ -162,7 +125,6 @@ impl PluginManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     const SAMPLE: &str = r#"
 [plugin]
@@ -180,21 +142,23 @@ strong = ["Cargo.lock"]
 weak   = ["Cargo.toml"]
 "#;
 
-    fn parse(text: &str) -> PluginManifest {
+    pub(super) fn parse(text: &str) -> PluginManifest {
         PluginManifest::parse(text, Path::new("test.toml")).expect("should parse")
     }
 
     #[test]
-    fn parses_the_plugin_section() {
-        let m = parse(SAMPLE);
-        assert_eq!(m.plugin.name, "cargo");
-        assert_eq!(m.plugin.version, "0.1.0");
-        assert_eq!(m.plugin.abi, Some(1));
-        assert_eq!(m.plugin.family.as_deref(), Some("rust"));
-        assert_eq!(
-            m.plugin.repository.as_deref(),
-            Some("https://github.com/imba97/bmux-plugin-cargo")
+    fn optional_sections_may_be_absent() {
+        let m = parse(
+            r#"
+[plugin]
+name    = "bare"
+version = "1.0.0"
+"#,
         );
+        assert!(m.lib.is_none());
+        assert!(m.plugin.abi.is_none());
+        assert!(m.plugin.family.is_none());
+        assert!(m.extra.is_empty());
     }
 
     /// Key behavior: a host-defined section (here `[detect]`) must be preserved
@@ -220,21 +184,6 @@ weak   = ["Cargo.toml"]
             Some("custom_stem")
         );
         assert!(again.extra.contains_key("detect"));
-    }
-
-    #[test]
-    fn optional_sections_may_be_absent() {
-        let m = parse(
-            r#"
-[plugin]
-name    = "bare"
-version = "1.0.0"
-"#,
-        );
-        assert!(m.lib.is_none());
-        assert!(m.plugin.abi.is_none());
-        assert!(m.plugin.family.is_none());
-        assert!(m.extra.is_empty());
     }
 
     #[test]

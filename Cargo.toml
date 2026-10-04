@@ -22,7 +22,7 @@ exclude = ["/.github", "/.scratch"]
 # contents, the lib name, the asset names) belongs to the library.
 [[bin]]
 name = "plugin-asset"
-path = "src/bin/plugin-asset.rs"
+path = "src/bin/plugin-asset/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"

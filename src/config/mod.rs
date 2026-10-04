@@ -3,12 +3,22 @@
 //!
 //! No host application name is hardcoded anywhere in this crate. Everything like
 //! `bmux` / `bmux-plugin.toml` / `bmux_plugin_entry_v1` is supplied here.
+//!
+//! # Layout
+//!
+//! Naming lives here, because every name is derived from the same few fields and they
+//! have to stay consistent. The paths those names are resolved against — the data dir
+//! and the files inside it — are in `paths`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::error::{KitError, KitResult};
+use crate::error::KitResult;
+
+mod paths;
+
+pub use paths::KitPaths;
 
 /// Default lock wait time.
 pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -176,57 +186,7 @@ impl KitConfig {
 
     /// Resolves the various paths. Creates directories as needed.
     pub fn paths(&self) -> KitResult<KitPaths> {
-        let root = match &self.data_dir {
-            Some(d) => d.clone(),
-            None => default_data_dir(&self.id)?,
-        };
-        Ok(KitPaths {
-            plugins: root.join("plugins"),
-            build: root.join("build"),
-            lock_file: root.join(".lock"),
-            index_file: root.join("plugins").join(".plugins.json"),
-            root,
-        })
-    }
-}
-
-/// Default data dir `~/.{id}`, as determined by `directories`.
-fn default_data_dir(id: &str) -> KitResult<PathBuf> {
-    let home = directories::UserDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
-        .ok_or(KitError::NoDataDir)?;
-    Ok(home.join(format!(".{id}")))
-}
-
-/// All paths the kit uses.
-#[derive(Debug, Clone)]
-pub struct KitPaths {
-    /// `<data-dir>` itself.
-    pub root: PathBuf,
-    /// Install dir of installed plugins, `<root>/plugins`.
-    pub plugins: PathBuf,
-    /// build-host scaffolding directory, `<root>/build`.
-    pub build: PathBuf,
-    /// Install exclusive lock file, `<root>/.lock`.
-    pub lock_file: PathBuf,
-    /// Install record cache, `<root>/plugins/.plugins.json`.
-    pub index_file: PathBuf,
-}
-
-impl KitPaths {
-    /// Install dir of one plugin, `<plugins>/<crate_name>`.
-    pub fn plugin_dir(&self, crate_name: &str) -> PathBuf {
-        self.plugins.join(crate_name)
-    }
-
-    /// Manifest path of one plugin.
-    pub fn manifest_path(&self, crate_name: &str, manifest_name: &str) -> PathBuf {
-        self.plugin_dir(crate_name).join(manifest_name)
-    }
-
-    /// build-host scaffolding directory of one plugin.
-    pub fn build_dir(&self, crate_name: &str) -> PathBuf {
-        self.build.join(crate_name)
+        KitPaths::resolve(self)
     }
 }
 
@@ -276,41 +236,6 @@ mod tests {
         let mut overridden = cfg();
         overridden.target_triple = Some("aarch64-apple-darwin".to_string());
         assert_eq!(overridden.effective_target(), "aarch64-apple-darwin");
-    }
-
-    #[test]
-    fn paths_honour_the_data_dir_override() {
-        let root = PathBuf::from("some").join("dir");
-        let c = cfg().with_data_dir(&root);
-        let p = c.paths().expect("must not touch HOME when overridden");
-
-        assert_eq!(p.root, root);
-        assert_eq!(p.plugins, root.join("plugins"));
-        assert_eq!(p.build, root.join("build"));
-        assert_eq!(p.lock_file, root.join(".lock"));
-        assert_eq!(p.index_file, root.join("plugins").join(".plugins.json"));
-    }
-
-    #[test]
-    fn plugin_paths_sit_under_the_plugins_dir() {
-        let root = PathBuf::from("some").join("dir");
-        let c = cfg().with_data_dir(&root);
-        let p = c.paths().unwrap();
-
-        assert_eq!(
-            p.plugin_dir("myapp-plugin-foo"),
-            root.join("plugins").join("myapp-plugin-foo")
-        );
-        assert_eq!(
-            p.build_dir("myapp-plugin-foo"),
-            root.join("build").join("myapp-plugin-foo")
-        );
-        assert_eq!(
-            p.manifest_path("myapp-plugin-foo", "myapp-plugin.toml"),
-            root.join("plugins")
-                .join("myapp-plugin-foo")
-                .join("myapp-plugin.toml")
-        );
     }
 
     #[test]

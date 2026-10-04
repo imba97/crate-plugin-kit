@@ -1,25 +1,16 @@
-//! `plugin-asset`: build a plugin checkout into the two files a release carries.
+//! The `plugin-asset` command line: what can be asked for, and what happens then.
 //!
-//! A thin shell around [`crate_plugin_kit::pack_plugin`]: parse the arguments, make one
-//! call, report what was written. Everything that decides *what* the files are called,
-//! what the generated wrapper contains, and whether the result is loadable lives in the
-//! library, where install-time and release-time share one implementation.
-//!
-//! ```text
-//! plugin-asset --id pmpx
-//!   -> dist/pmpx-plugin-pnpm-0.1.0-x86_64-unknown-linux-gnu.so
-//!   -> dist/pmpx-plugin-pnpm-0.1.0-x86_64-unknown-linux-gnu.toml
-//! ```
+//! Hand-rolled rather than pulled in: this is seven flags, and the crate's dependency
+//! list is part of its interface — every plugin installation compiles it.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 use crate_plugin_kit::{pack_plugin, KitConfig, PackOptions};
 
 /// Exit code for a usage error, matching the convention the hosts use (`pmpx` uses 2).
-const EXIT_USAGE: u8 = 2;
+pub(super) const EXIT_USAGE: u8 = 2;
 
-const USAGE: &str = "\
+pub(super) const USAGE: &str = "\
 plugin-asset — build a plugin checkout into the files a release carries.
 
 Usage:
@@ -46,46 +37,15 @@ It writes two files, named exactly as the download path expects them:
 Both paths are printed on success.
 ";
 
-fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
-    match parse(&argv) {
-        Ok(Action::Help) => {
-            print!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-
-        Ok(Action::Version) => {
-            println!("plugin-asset {}", crate_plugin_kit::VERSION);
-            ExitCode::SUCCESS
-        }
-
-        Ok(Action::Pack(args)) => match run(&args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("plugin-asset: {message}");
-                ExitCode::FAILURE
-            }
-        },
-
-        Err(message) => {
-            eprintln!("plugin-asset: {message}");
-            eprintln!();
-            eprint!("{USAGE}");
-            ExitCode::from(EXIT_USAGE)
-        }
-    }
-}
-
 /// What the command line asked for.
-enum Action {
+pub(super) enum Action {
     Help,
     Version,
     Pack(Args),
 }
 
 /// A parsed `plugin-asset` command line.
-struct Args {
+pub(super) struct Args {
     id: String,
     manifest_path: PathBuf,
     out_dir: PathBuf,
@@ -95,7 +55,7 @@ struct Args {
 }
 
 /// Runs the requested packing.
-fn run(args: &Args) -> Result<(), String> {
+pub(super) fn run(args: &Args) -> Result<(), String> {
     let mut cfg = KitConfig::new(args.id.clone());
     if let Some(target) = &args.target {
         // The same override install uses; here it also decides the asset's file name.
@@ -122,10 +82,7 @@ fn run(args: &Args) -> Result<(), String> {
 }
 
 /// Parses the arguments.
-///
-/// Hand-rolled rather than pulled in: this is seven flags, and the crate's dependency
-/// list is part of its interface — every plugin installation compiles it.
-fn parse(argv: &[String]) -> Result<Action, String> {
+pub(super) fn parse(argv: &[String]) -> Result<Action, String> {
     let mut id: Option<String> = None;
     let mut manifest_path = PathBuf::from("Cargo.toml");
     let mut out_dir = PathBuf::from("dist");
