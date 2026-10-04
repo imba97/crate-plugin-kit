@@ -227,9 +227,6 @@ trust model as `cargo install`.
 
 <https://github.com/imba97/crate-plugin-kit>
 
-Design notes and the reasoning behind these choices live in
-[`docs/proposal.md`](docs/proposal.md).
-
 ## License
 
 MIT — see [LICENSE](LICENSE).

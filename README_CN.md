@@ -215,8 +215,6 @@ let entry: *const MyHostEntry = plugin.entry();
 
 <https://github.com/imba97/crate-plugin-kit>
 
-设计说明与这些取舍背后的理由写在 [`docs/proposal.md`](docs/proposal.md)。
-
 ## 许可
 
 MIT —— 见 [LICENSE](LICENSE)。

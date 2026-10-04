@@ -1,5 +1,9 @@
 /target
 
+# Dev-only local overrides (`[patch.crates-io]` aimed at a checkout outside this repository).
+# Cargo fails hard on a patch pointing at a missing path, so this must never be committed.
+/.cargo/config.toml
+
 # IDE
 /.idea
 /.vscode/*.log
