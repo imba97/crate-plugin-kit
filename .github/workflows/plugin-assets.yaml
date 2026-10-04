@@ -1,0 +1,134 @@
+name: Plugin assets
+
+# Produces one plugin's prebuilt assets -- the cdylib and its manifest, named the way a host
+# looks for them:
+#
+#   {crate}-{version}-{target}.{so|dylib|dll}
+#   {crate}-{version}-{target}.toml
+#
+# It lives here rather than in each plugin repository because this repository owns the
+# convention: `plugin-asset` is the tool that does the packing, and the tool version below is
+# what decides which wrapper generation an asset was built with. A plugin repository calls it
+# with a handful of lines:
+#
+#     assets:
+#       name: Assets
+#       needs: [checks]
+#       uses: imba97/crate-plugin-kit/.github/workflows/plugin-assets.yaml@main
+#       with:
+#         id: <the host's id>
+#       permissions:
+#         contents: write
+#
+# `id` is required and has no default on purpose. This file belongs to a general-purpose
+# library, so it does not carry any one host's name in it -- the host's identity belongs in the
+# repositories that serve that host, which is also where a reader looks for it.
+#
+# Everything else comes from the *caller's* context: the checkout is the plugin repository at
+# the tag being released, `github.ref_name` is that tag, and the release the assets are
+# attached to is the caller's. So the version below is the only thing anyone maintains, and
+# it is maintained once, here.
+#
+# `@main` in the call above is deliberate: it is what makes a new generator version take effect
+# everywhere without editing five repositories. The trade is that re-running an old plugin
+# release resolves this file as it is *now* -- the assets it produces are still valid
+# (compatibility is the ABI, not the generator version), but they may not be byte-identical to
+# the ones the original run produced. Pin a tag or a commit here instead if that ever becomes
+# the wrong trade.
+
+on:
+  # Called by a plugin repository's release.yaml, which a `v<major>.<minor>.<patch>` tag
+  # starts. There is deliberately no `workflow_dispatch`: a release's assets can only ever be
+  # the ones its own tag produced.
+  workflow_call:
+    inputs:
+      id:
+        description: Host application id the assets are named for -- the same string the host passes to KitConfig::new. The manifest name, crate prefix, lib stem and entry symbol are all derived from it.
+        # Required, and deliberately without a default: this workflow has no host of its own.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # The single place this version appears in the whole ecosystem. Bumping it is a deliberate
+  # act: it decides which wrapper generation future assets are built with, for every plugin
+  # that calls this workflow.
+  PLUGIN_ASSET_VERSION: "0.2.1"
+
+jobs:
+  assets:
+    name: Assets (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      # One runner per target, because an asset is only ever used by a host built for the same
+      # triple: the file name and the extension both follow the target, not the machine that
+      # built it. A target missing here is not a failure -- that host falls back to building
+      # from source, which is the default anyway. Adding one is two lines, in this one file.
+      #   `macos-13` is retired; `macos-15-intel` is its replacement, and plain `macos-15` is
+      #   the Apple silicon image.
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      # Create the release for the caller's tag and upload into it. The caller grants this
+      # too; a called workflow can only narrow permissions.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Installed from the release archive instead of compiled. This job runs once per target,
+      # and building the tool from source in each of them meant minutes of compiling per leg
+      # for the same bytes every time. `cargo-binstall` reads the archive out of the release;
+      # `[package.metadata.binstall]` in that crate says where the binary sits inside it.
+      #
+      # `--disable-strategies compile` is deliberate: with the compile fallback left on, a
+      # missing or broken archive would silently go back to compiling and this step would keep
+      # "working" while the release got slow again -- the failure nobody reads the logs for.
+      # With it, a release stops instead.
+      - uses: cargo-bins/cargo-binstall@v1.25.1
+
+      - name: Install plugin-asset
+        run: cargo binstall crate-plugin-kit --version ${{ env.PLUGIN_ASSET_VERSION }} --bin plugin-asset --no-confirm --disable-strategies compile
+
+      # `--target-dir` keeps its default (`<checkout>/target`), which is what the cache action
+      # above stores, so the dependency builds are reused between releases. The tool refuses to
+      # write anything if the version in `pmpx-plugin.toml` and the one in `Cargo.toml`
+      # disagree, and it `dlopen`s the result before handing it over.
+      - name: Build the assets
+        run: plugin-asset --id ${{ inputs.id }} --target ${{ matrix.target }} --out-dir dist
+
+      # The release object is created here -- the crates.io job does not need one. Every matrix
+      # leg tries, so "already exists" and losing that race are not failures; only the upload
+      # has to succeed.
+      - name: Upload them to the tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --notes "Release $tag" \
+            || true
+          gh release upload "$tag" dist/* --clobber
+          echo "assets now on the release:"
+          gh release view "$tag" --json assets --jq '.assets[].name'
