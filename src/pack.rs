@@ -28,11 +28,12 @@
 //!    above, and — when the build target is this machine — `dlopen` the result to prove
 //!    it really exports the entry symbol.
 //!
-//! The wrapper project is left in place (as [`crate::install`] leaves its build dir) so
-//! that a failed build can be inspected.
+//! A failed build leaves the generated wrapper in the temp directory, which is where
+//! someone looks to see why; a successful one removes it again.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::KitConfig;
 use crate::error::{KitError, KitResult};
@@ -143,8 +144,11 @@ pub fn build(
         .clone()
         .unwrap_or_else(|| plugin_dir.join("target"));
 
+    // A directory of this run's own. Sharing one by crate name would mean two runs — two
+    // tests, or two pack calls in one program — deleting and writing the same files at
+    // once; on Windows deleting a directory another process still has open fails outright
+    // with "access denied".
     let wrapper_dir = wrapper_dir(cfg, &crate_name);
-    remove_dir_if_exists(&wrapper_dir)?;
     std::fs::create_dir_all(wrapper_dir.join("src"))?;
 
     let stem = cfg.lib_stem(&crate_name);
@@ -210,6 +214,16 @@ pub fn build(
         let _loaded = unsafe { crate::loader::open::<()>(&library, &cfg.entry_symbol) }?;
     }
 
+    // Only worth keeping while something went wrong; a caller that packs repeatedly should
+    // not leave a trail of scaffolding in the temp directory. This removes the whole per-run
+    // directory, the crate directory inside it included.
+    //
+    // Failure is ignored on purpose: see `wrapper_dir` for why removing it can be refused on
+    // Windows, and a leftover directory is not a reason to fail a successful pack.
+    if let Some(run_root) = wrapper_dir.parent() {
+        let _ = remove_dir_if_exists(run_root);
+    }
+
     Ok(PackedAssets {
         crate_name,
         version,
@@ -219,13 +233,25 @@ pub fn build(
     })
 }
 
-/// Where the generated wrapper lives for one crate.
+/// Where this run's generated wrapper lives: `<temp>/<id>-plugin-asset-<pid>-<n>/<crate>`.
 ///
-/// Deterministic rather than random: a failed build leaves files worth looking at, and a
-/// second run replaces them instead of piling up directories.
+/// Unique per call, not per crate: two runs at once (two threads packing, or two `plugin
+/// asset` processes) must not delete and rewrite each other's files. The crate name stays in
+/// the path so a leftover directory is still identifiable, and the process id separates
+/// concurrent processes.
+///
+/// A failed build leaves the directory behind, which is the point — that is where someone
+/// looks. A successful one removes the per-run directory (its parent) again.
 fn wrapper_dir(cfg: &KitConfig, crate_name: &str) -> PathBuf {
+    static RUN: AtomicU64 = AtomicU64::new(0);
+
+    let run = RUN.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("{}-plugin-asset", cfg.id))
+        .join(format!(
+            "{}-plugin-asset-{}-{run}",
+            cfg.id,
+            std::process::id()
+        ))
         .join(crate_name)
 }
 
@@ -249,19 +275,37 @@ mod tests {
         );
     }
 
+    /// The regression this exists for: one directory per crate, shared by concurrent runs,
+    /// meant one run could be deleting files another was writing or compiling — which on
+    /// Windows fails outright with "access denied".
     #[test]
-    fn the_wrapper_dir_is_keyed_by_id_and_crate() {
+    fn every_run_gets_its_own_wrapper_dir() {
         let cfg = KitConfig::new("myapp");
-        let dir = wrapper_dir(&cfg, "myapp-plugin-foo");
 
-        assert!(dir.ends_with("myapp-plugin-foo"), "{}", dir.display());
+        let first = wrapper_dir(&cfg, "myapp-plugin-foo");
+        let second = wrapper_dir(&cfg, "myapp-plugin-foo");
+        assert_ne!(first, second, "{first:?} must not be reused");
+
+        // Still identifiable: the crate name is the last component and the app id leads.
+        assert!(first.ends_with("myapp-plugin-foo"), "{}", first.display());
         assert!(
-            dir.parent()
+            first
+                .parent()
                 .and_then(|p| p.file_name())
-                .map(|n| n == "myapp-plugin-asset")
+                .map(|n| n.to_string_lossy().starts_with("myapp-plugin-asset"))
                 .unwrap_or(false),
             "{}",
-            dir.display()
+            first.display()
+        );
+    }
+
+    #[test]
+    fn two_crates_do_not_share_a_directory() {
+        let cfg = KitConfig::new("myapp");
+
+        assert_ne!(
+            wrapper_dir(&cfg, "myapp-plugin-foo"),
+            wrapper_dir(&cfg, "myapp-plugin-bar")
         );
     }
 

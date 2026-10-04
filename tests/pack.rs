@@ -208,3 +208,61 @@ fn the_target_dir_can_be_moved() {
         "nothing should have been written into the checkout"
     );
 }
+
+/// Two runs at once must not interfere.
+///
+/// This is a regression test, not a hypothetical: every run used to build in one directory
+/// keyed by the crate name, so two packs of the same plugin deleted and rewrote each other's
+/// files. On Windows that is not a flake but an outright failure — removing a directory
+/// another process still has open is refused with "access denied" (os error 5).
+#[test]
+fn packing_the_same_plugin_twice_at_once_works() {
+    let (tmp, plugin) = fixture();
+    let first_out = tmp.path().join("dist-first");
+    let second_out = tmp.path().join("dist-second");
+    let first_cache = tmp.path().join("cache-first");
+    let second_cache = tmp.path().join("cache-second");
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            pack_plugin(
+                &cfg(),
+                &plugin,
+                &first_out,
+                &PackOptions {
+                    target_dir: Some(first_cache.clone()),
+                    ..PackOptions::default()
+                },
+            )
+        });
+        let second = scope.spawn(|| {
+            pack_plugin(
+                &cfg(),
+                &plugin,
+                &second_out,
+                &PackOptions {
+                    target_dir: Some(second_cache.clone()),
+                    ..PackOptions::default()
+                },
+            )
+        });
+
+        (
+            first
+                .join()
+                .expect("the first pack thread should not panic"),
+            second
+                .join()
+                .expect("the second pack thread should not panic"),
+        )
+    });
+
+    let first = first.expect("the first pack should succeed");
+    let second = second.expect("the second pack should succeed");
+
+    assert!(first.library.is_file(), "{:?}", first.library);
+    assert!(second.library.is_file(), "{:?}", second.library);
+    // Same content, different destinations: neither run disturbed the other.
+    assert_ne!(first.library, second.library);
+    assert_eq!(first.base_name(), second.base_name());
+}
