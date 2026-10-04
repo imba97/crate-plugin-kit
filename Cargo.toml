@@ -1,0 +1,39 @@
+[package]
+name = "crate-plugin-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "A cargo-based plugin system: install cdylib plugins from crates.io and load them at runtime."
+license = "MIT"
+authors = ["imba97 <mail@imba97.cn>"]
+repository = "https://github.com/imba97/crate-plugin-kit"
+homepage = "https://github.com/imba97/crate-plugin-kit"
+documentation = "https://docs.rs/crate-plugin-kit"
+keywords = ["plugin", "cdylib", "dlopen", "cargo", "extension"]
+categories = ["development-tools", "filesystem"]
+readme = "README.md"
+
+# 不打包进 .crate 的东西。
+# `docs/proposal.md` 是设计文档，值得随源码一起发；只排掉纯粹的本地文件。
+exclude = ["/.github", "/.scratch"]
+
+# 单元素 workspace：阻止 Cargo 沿目录树向上找到别的 workspace 根。
+#
+# ⚠️ 没有这张表时，如果本仓库旁边正好躺着另一个含 [workspace] 的检出，
+# Cargo 会认定本 package 属于那个 workspace 并拒绝构建。**不要删。**
+# 而且发布构建可能在一个根本没有这种邻居的检出里跑，构建过程绝不能依赖邻居存在。
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
+libloading = "0.9.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+toml = "1.1.6"
+ureq = "3.4.2"
+which = "8.0.6"
+
+[dev-dependencies]
+tempfile = "3"

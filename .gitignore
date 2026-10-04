@@ -1,0 +1,9 @@
+/target
+
+# IDE
+/.idea
+/.vscode/*.log
+*.swp
+
+# Scratch
+*.tmp

@@ -1,0 +1,84 @@
+name: Release
+
+# 发布不是幂等的：一个 crate 名 + 版本号一旦发出去就永远不能复用，被 yank 的版本也
+# 不能取消 yank。所以这个 workflow 是**写成拒绝、而不是写成猜**的，并且在一次失败之后
+# 可以安全重跑 —— 因为"这个版本已经在 registry 上了"算完成，不算错误。
+#
+# 检查放在 ci.yaml 里，由这里调用。把它们保持在同一次运行里，顺序才是结构性的。
+
+on:
+  push:
+    # 唯一的触发器：`v<major>.<minor>.<patch>` tag。
+    # 没有别的东西能启动一次运行，也就没有别的东西能碰到 registry，
+    # 而"release tag 长什么样"是在这里强制的，不是靠某个脚本记得去检查。
+    tags: [ "v*.*.*" ]
+
+# 默认只读；发布 job 也不再要求更多。
+permissions:
+  contents: read
+
+jobs:
+  # 一切不需要凭据就能做的检查：格式、clippy、三个平台的测试、rustdoc、
+  # `cargo package`、无 async runtime、以及 MSRV 构建。
+  #
+  # 调用整个文件意味着 publish 会等它里面的**每一个** job（矩阵也算），
+  # 而不需要在这里把它们列一遍 —— 列一遍就会漏。
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yaml
+
+  # ---------------------------------------------------------------------------
+  # crates.io。
+  #
+  # 这是一个单 crate 仓库（`[workspace]` 下只有它自己），没有 workspace 内部的
+  # 依赖顺序要守，也没有"等依赖先进索引"的问题 —— 它的依赖全在 crates.io 上现成躺着。
+  # 所以 harbor 算出来的计划就是一行，而它顺手把 tag 与 token 也校验了。
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [ checks ]
+    runs-on: ubuntu-latest
+    # 不需要 `if:`：tag push 是唯一的入口，能跑到这个 job 就说明确实要发布，
+    # 而 `needs` 保证了检查已经全过。
+    #
+    # 也刻意不声明 `environment:`。声明它会把 secret 挪进 environment 作用域，
+    # 并要求那个 environment 在首次运行前就存在 —— 对这道目前还不需要的闸门来说不值。
+    # token 从 Settings → Secrets and variables → Actions 读。
+    # 将来想加人工审批，就建 environment、把 `environment: <name>` 加回来、再把 secret 挪进去。
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # 这个 job 刻意不用 `rust-cache`：它没有依赖要缓存（包是现成的），
+      # `cargo publish` 几秒钟就验证完；而恢复测试 job 的缓存正是当初让这个 job
+      # 去清理一棵它从没创建过的 `target/package/` 树的原因。
+
+      # 发布工具。这个 job 以前用 shell 算出来的东西 —— tag 校验、token 校验、
+      # 发布循环 —— 现在都是 harbor 的一条命令。
+      - name: Install the release tool
+        run: cargo install harbor --locked
+
+      # 两道路闸加一份计划，一条命令搞定：tag 名与 manifest 里的版本一致、
+      # registry token 存在且非空、发布计划算得出来。三条都成立之前，什么都不会上传。
+      #
+      # token 只经环境变量传递、绝不作为命令行参数，这样它不会因为 cargo 回显命令行而进日志。
+      - name: Check the release before starting it
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo harbor check --plan "$GITHUB_REF_NAME"
+
+      # harbor publish 会：依赖还没进索引时重试；把"版本已在 registry 上"当成已完成
+      # （所以重跑能补完一次半途失败的发布）；其它任何错误立刻停，而不是把重试预算
+      # 花在一个重试解决不了的失败上。
+      #
+      # 没有 `--order`：这是一个单包 workspace，`check --plan` 刚算出来的计划就是全部答案。
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo harbor publish

@@ -1,0 +1,20 @@
+[package]
+name = "toyapp-plugin-toy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 单元素 workspace。它被复制到临时目录后编译，但它住在主 crate 的 tests/ 下，
+# 所以带着这张表更保险 —— 万一将来有人就地编译，也不会被上层的 [workspace] 认领。
+[workspace]
+
+# 名字必须与 KitConfig::lib_stem("toyapp-plugin-toy") 的推导结果一致：
+#   id = "toyapp" → lib_stem_prefix = "toyapp_plugin_"
+#   crate_prefix   = "toyapp-plugin-" → 去掉前缀剩下 "toy"
+#   ⇒ toyapp_plugin_toy
+[lib]
+name = "toyapp_plugin_toy"
+crate-type = ["cdylib"]
+
+# 刻意零依赖 —— 这样测试可以在完全离线的情况下把它编出来。
+[dependencies]

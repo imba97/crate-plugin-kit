@@ -1,0 +1,12 @@
+# 统一 LF。
+#
+# 这个 crate 会被发到 crates.io，源文件里混进 CRLF 没有好处，
+# 而且会让 diff 在 Windows / Unix 之间来回抖。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png  binary
+*.ico  binary
+*.dll  binary
+*.so   binary
+*.dylib binary

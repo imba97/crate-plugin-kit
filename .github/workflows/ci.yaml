@@ -1,0 +1,125 @@
+name: Checks
+
+# release 必须先过的检查。这个文件**没有自己的触发器**：唯一能跑它的方式是从
+# release.yaml 调用它。
+#
+# 这就是让「检查没过就不发布」成为**结构性**保证、而不是靠时序去凑的原因。
+# `workflow_run` 也能让两个 workflow 相互等待，但它跑在**第二次**运行里、用的是
+# 默认分支上的那份文件，tag 还得手工传过去。作为可复用 workflow，这里就只是同一个
+# 运行里的 `needs:`。
+on:
+  workflow_call:
+
+# 只读：这里没有任何东西需要写回去。
+permissions:
+  contents: read
+
+# 这里也声明一遍：workflow 自己的 `env` **不会**传给它调用的 workflow。
+env:
+  CARGO_TERM_COLOR: always
+  # 让任何 build script 或 rustc 调用在发出我们关心的警告时直接失败。
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    # 这个 crate 直接跟动态库打交道：`dlopen`/`dlsym`、平台相关的文件名推导
+    # （Windows 是 `x.dll`，macOS 是 `libx.dylib`，Linux 是 `libx.so`），
+    # 还有一个真的编译并加载 cdylib 的 e2e 测试。所以三个平台都跑，而不是只跑一个。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # 这个仓库**刻意没有** `rust-toolchain.toml`（理由写在 README 的 Development 一节）：
+      # 钉死的 channel 会盖过下面 msrv job 的 `cargo +<msrv>`，而 `Cargo.toml` 里的
+      # `rust-version` 才是对使用者的承诺，由那个 job 单独兑现。
+      - name: Install stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # 包含集成测试：它会真的 `cargo build` 出一个 fixture cdylib，把它拷进一个
+      # 临时插件库，然后 `dlopen` 并跨边界调用一个函数指针。
+      - name: Test
+        run: cargo test --locked
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+      # `cargo package` 会在 `<target>/package/` 下解包并重建来验证 crate。
+      # 给这一步一个自己的 target 目录：既避开缓存动作在收尾清理时踩到那棵树
+      # （cargo-bumpp 那边实际遇到过），也不把这次验证构建塞进缓存 —— 那里用不上它。
+      - name: Package
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/package-target
+        run: cargo package --locked
+
+      # 「全栈零 async runtime」是 README 与设计说明里写下的承诺。
+      # 没有这道检查，它就只是一句话 —— 某个依赖顺手把 tokio 拖进来，谁都不会发现。
+      - name: No async runtime in the dependency tree
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          names=$(cargo tree --prefix none 2>/dev/null | awk '{print $1}' | sort -u)
+          offenders=$(printf '%s\n' "$names" \
+            | grep -xE 'tokio|async-std|smol|async-io|async-executor|async-global-executor' \
+            || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::这个 crate 承诺零 async runtime，但依赖树里出现了："
+            echo "$offenders"
+            exit 1
+          fi
+          echo "依赖树里没有任何 async runtime"
+
+  # ---------------------------------------------------------------------------
+  # MSRV。`rust-version = "1.88"` 是个承诺；没有这个 job，它就只是 manifest 里的一行字。
+  #
+  # 1.88 不是随手填的：它是依赖里最高的那个 `rust-version`（`libloading` 0.9 要 1.88，
+  # `toml` / `ureq` 要 1.85）。cargo 会按最高值校验工具链，所以这里就是在验证那个数字。
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read rust-version from the manifest
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["package"]["rust-version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $version"
+
+      - name: Install MSRV toolchain
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+
+      # --locked：CI 应当解析已提交的 lockfile，而不是今天碰巧解析到什么。
+      # `cargo build` 而不是 `cargo test`：集成测试会再起一次 `cargo build` 去编 fixture，
+      # 在 MSRV 上跑完整测试套是另一件事；这个 job 只证明**它能编**。
+      - name: Build on MSRV
+        run: cargo build --all-targets --locked
