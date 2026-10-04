@@ -26,23 +26,16 @@ name: Assets
 # attach an artifact to a tag whose checks failed" is structural instead of a matter of
 # timing two independent runs.
 #
-# `workflow_dispatch` exists to exercise the pipeline against an existing tag: these runners
-# only exist on GitHub, so without it the first real run would be the next release. It
-# rebuilds from the named tag's source and overwrites what is there.
+# There is deliberately no `workflow_dispatch`, for the same reason the registry path has no
+# second trigger: the tag is the only way in, so a release's archive can only ever be the one
+# its own tag produced. A failed run is re-run from the Actions page, which keeps the same
+# tag -- that is the recovery path, and it cannot attach an archive to a tag that was never
+# pushed.
 
 on:
+  # Called from release.yaml, which a `v<major>.<minor>.<patch>` tag starts. Nothing else can
+  # start this; the tag travels in as the ref the caller runs on.
   workflow_call:
-    inputs:
-      tag:
-        description: Tag to attach the archives to. Empty = the tag that started the run.
-        required: false
-        type: string
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Tag to attach the archives to (rebuilt from that tag's source)
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -76,7 +69,7 @@ jobs:
           # On a manual run the workflow is running against a branch, so the archive has to be
           # built from the tag that was named -- otherwise the bytes of main would land on an
           # old release.
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ github.ref_name }}
 
       # `shell: bash` on every runner: it exists on all three, and it keeps this step from
       # being one script on Linux and another on Windows.
@@ -109,7 +102,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="${{ github.ref_name }}"
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "$tag" --notes "Release $tag" \
             || true
@@ -144,7 +137,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="${{ github.ref_name }}"
           mkdir -p dist
           cd dist
           gh release download "$tag" --pattern 'crate-plugin-kit-*' --clobber
@@ -158,4 +151,4 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag || github.ref_name }}" SHA256SUMS --clobber
+        run: gh release upload "${{ github.ref_name }}" SHA256SUMS --clobber
