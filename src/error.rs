@@ -155,6 +155,41 @@ pub enum KitError {
         dir: String,
     },
 
+    /// No `Cargo.toml` where one was expected.
+    #[error("no Cargo.toml in {dir}")]
+    NoManifest {
+        /// The directory that was looked in.
+        dir: PathBuf,
+    },
+
+    /// `cargo metadata` did not describe the crate whose manifest was given.
+    ///
+    /// Either the manifest is not part of the reported workspace, or the output could
+    /// not be matched to it.
+    #[error("cargo metadata does not describe the package at {manifest}")]
+    NoPackage {
+        /// Manifest path that was asked about.
+        manifest: PathBuf,
+    },
+
+    /// The plugin manifest's `[plugin] version` disagrees with the crate's own version.
+    ///
+    /// Release assets carry both, and they have to be the same number: the manifest is
+    /// what a host reads before it downloads anything, and the asset file name is built
+    /// from the crate version.
+    #[error(
+        "the plugin manifest {path} declares version {declared}, but the crate version is \
+         {crate_version}"
+    )]
+    VersionMismatch {
+        /// Manifest path.
+        path: PathBuf,
+        /// Version declared inside the manifest.
+        declared: String,
+        /// Version declared by `Cargo.toml`.
+        crate_version: String,
+    },
+
     /// The network request failed. The message carries the URL and status code.
     #[error("network request failed: {0}")]
     Http(String),

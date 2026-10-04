@@ -3,7 +3,7 @@ name = "crate-plugin-kit"
 version = "0.1.3"
 edition = "2021"
 rust-version = "1.88"
-description = "Installs cdylib plugins from a crate registry and loads them at runtime."
+description = "Installs and loads cdylib plugins and builds their prebuilt assets."
 license = "MIT"
 authors = ["imba97 <mail@imba97.cn>"]
 repository = "https://github.com/imba97/crate-plugin-kit"
@@ -16,6 +16,13 @@ readme = "README.md"
 # Things that are not packaged into the .crate.
 # Only purely local files are excluded.
 exclude = ["/.github", "/.scratch"]
+
+# Producing the release assets. A bin in the same crate rather than a crate of its own:
+# it is a thin shell over `pack_plugin`, and every decision it makes (the wrapper's
+# contents, the lib name, the asset names) belongs to the library.
+[[bin]]
+name = "plugin-asset"
+path = "src/bin/plugin-asset.rs"
 
 [dependencies]
 anyhow = "1.0.104"

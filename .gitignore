@@ -1,5 +1,10 @@
 /target
 
+# The integration-test fixtures are compiled with their own target directory (and a lockfile
+# of their own if someone builds one by hand); neither belongs in the repository.
+tests/fixtures/*/target
+tests/fixtures/*/Cargo.lock
+
 # Dev-only local overrides (`[patch.crates-io]` aimed at a checkout outside this repository).
 # Cargo fails hard on a patch pointing at a missing path, so this must never be committed.
 /.cargo/config.toml

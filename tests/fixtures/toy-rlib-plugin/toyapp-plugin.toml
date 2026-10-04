@@ -1,0 +1,13 @@
+# Read by the kit when it scans a plugin directory; no dlopen is involved.
+
+[plugin]
+name    = "toy"
+version = "0.1.0"
+abi     = 1
+family  = "test"
+
+# A host section: the kit does not know it and must not touch it. It is copied verbatim
+# into the release asset, so whatever a host needs has to survive the trip.
+[detect]
+strong = ["toy.lock"]
+weak   = ["toy.json"]

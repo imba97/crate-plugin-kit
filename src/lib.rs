@@ -55,6 +55,7 @@
 //! | No ABI validation | That is the host contract crate's job (only it knows what is inside `T`). This crate only resolves the symbol |
 //! | Fully synchronous | No async runtime. Installing a plugin = running `cargo build`; loading it = `dlopen` |
 //! | build-host is the default | It goes through `cargo` and therefore uses the registry / mirror the user already configured; prebuilt downloads from GitHub bypass those, so it is only an accelerator |
+//! | Publishing is the same wrapper | [`pack_plugin`] builds the wrapper from a local checkout and names the two files the download path looks for, so a release does not need a second implementation of any of this |
 //!
 //! ## Division of labor with the host contract crate
 //!
@@ -81,14 +82,18 @@ pub mod install;
 pub mod loader;
 pub mod lock;
 pub mod manifest;
+pub mod pack;
 pub mod panic;
 pub mod registry;
 pub mod store;
+
+mod wrapper;
 
 pub use config::{KitConfig, KitPaths, DEFAULT_LOCK_TIMEOUT};
 pub use error::{KitError, KitResult};
 pub use loader::{find_library, library_candidates, LoadedPlugin};
 pub use manifest::{LibSection, PluginManifest, PluginSection};
+pub use pack::{build as pack_plugin, PackOptions, PackedAssets};
 pub use registry::{CrateInfo, CrateSummary, Registry};
 pub use store::{CratePluginKit, PluginInfo};
 

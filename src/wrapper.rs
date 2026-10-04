@@ -1,0 +1,495 @@
+//! Generating the wrapper project that turns a plugin rlib into a cdylib.
+//!
+//! # Why a wrapper is needed
+//!
+//! `cargo install` only knows about bin targets, so a `crate-type = ["cdylib"]` crate
+//! cannot be installed that way. And `cargo build` on a plugin crate directly does not
+//! make Cargo produce a cdylib for a dependency either.
+//!
+//! So a wrapper project of a few dozen lines is generated:
+//!
+//! ```text
+//! <build dir>/<crate>/
+//! ├── Cargo.toml        # [lib] crate-type = ["cdylib"], depends on the plugin and the host contract crate
+//! └── src/lib.rs        # one line: <contract>::export!(<plugin_crate>::create);
+//! ```
+//!
+//! The benefit is that the plugin's own crate stays a plain rlib: crates.io consumes
+//! it normally, unit tests can `use` it directly, and the plugin author does not have
+//! to write a single `#[no_mangle]`.
+//!
+//! # Two callers, one implementation
+//!
+//! | Caller | Plugin source | Purpose |
+//! | --- | --- | --- |
+//! | [`crate::install::build_host`] | a published crate, pinned | install on the user's machine |
+//! | [`crate::pack`] | a local checkout, as a path dependency | produce the release assets |
+//!
+//! They must not drift apart. If the wrapper here stops calling `export!`, the cdylib
+//! has no entry symbol and `dlopen` fails — on someone else's machine. If it stops
+//! copying the plugin's own contract requirement, the graph holds two copies of the
+//! contract crate and the build fails with an E0308 that mentions neither version.
+//!
+//! # Why the contract requirement is copied verbatim
+//!
+//! Getting this wrong is not a cosmetic problem. If the wrapper's requirement and the
+//! plugin's own requirement resolve to different versions, the graph holds two copies
+//! of the contract crate; each defines its own `PackageManager`, and the `export!` in
+//! the wrapper stops typechecking with an E0308 that the plugin author has no way to
+//! see coming. Cargo will not unify them for us even when one version satisfies both,
+//! because `0.0.x` releases are incompatible across patches by definition. Copying the
+//! plugin's own requirement makes the two agree by construction.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::config::KitConfig;
+use crate::error::{KitError, KitResult};
+
+/// Where the wrapper gets the plugin crate from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PluginSource<'a> {
+    /// A published crate, pinned exactly: the version recorded in the install record
+    /// and the cdylib that was actually built must be the same one.
+    Registry { version: &'a str },
+
+    /// A local checkout, as a path dependency. Used when producing release assets:
+    /// the version being published is not on the registry yet.
+    Path { dir: &'a Path },
+}
+
+/// What the plugin declares about the contract crate.
+///
+/// Taken from the plugin crate's own manifest, which is the only place that knows it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ContractDep {
+    /// Version requirement, such as `=0.0.3`.
+    pub req: Option<String>,
+
+    /// Set when the plugin depends on the contract crate by path.
+    ///
+    /// The wrapper then mirrors the path as well, so packing a checkout works before
+    /// the contract crate has ever been published.
+    pub path: Option<PathBuf>,
+}
+
+/// Writes the wrapper project into `dir` (which must already exist).
+pub(crate) fn write(
+    cfg: &KitConfig,
+    dir: &Path,
+    crate_name: &str,
+    stem: &str,
+    plugin: PluginSource<'_>,
+    contract: Option<&ContractDep>,
+) -> KitResult<()> {
+    let crate_ident = crate_name.replace('-', "_");
+
+    let rewritten = match plugin {
+        PluginSource::Registry { .. } => "every install rewrites it",
+        PluginSource::Path { .. } => "plugin-asset rewrites it on every run",
+    };
+
+    let plugin_dep = match plugin {
+        PluginSource::Registry { version } => format!(r#"{crate_name} = "={version}""#),
+        PluginSource::Path { dir } => {
+            format!(r#"{crate_name} = {{ path = "{}" }}"#, slash(dir))
+        }
+    };
+
+    let contract_dep = match contract {
+        Some(ContractDep {
+            path: Some(path),
+            req,
+        }) => match req {
+            Some(req) => format!(
+                r#"{contract}   = {{ path = "{}", version = "{req}" }}"#,
+                slash(path),
+                contract = cfg.contract_crate
+            ),
+            None => format!(
+                r#"{contract}   = {{ path = "{}" }}"#,
+                slash(path),
+                contract = cfg.contract_crate
+            ),
+        },
+        _ => format!(
+            r#"{contract}   = "{version}""#,
+            contract = cfg.contract_crate,
+            version = contract
+                .and_then(|c| c.req.as_deref())
+                .unwrap_or(cfg.contract_version.as_str())
+        ),
+    };
+
+    let mut toml = format!(
+        r#"# Generated by crate-plugin-kit; do not edit by hand — {rewritten}.
+[package]
+name         = "{crate_name}-wrapper"
+version      = "0.0.0"
+edition      = "{edition}"
+publish      = false
+
+# Single-element workspace: the wrapper must not be claimed by any Cargo.toml above it.
+[workspace]
+
+[lib]
+name       = "{stem}"
+crate-type = ["cdylib"]
+
+[dependencies]
+{plugin_dep}
+{contract_dep}
+"#,
+        edition = cfg.wrapper_edition,
+    );
+
+    // Local path overrides: during development, point the plugin and the contract
+    // crate at a local checkout.
+    if !cfg.local_overrides.is_empty() {
+        toml.push_str(
+            "\n# from KitConfig::local_overrides (development only)\n[patch.crates-io]\n",
+        );
+        for (name, path) in &cfg.local_overrides {
+            toml.push_str(&format!("{name} = {{ path = \"{}\" }}\n", slash(path)));
+        }
+    }
+
+    std::fs::write(dir.join("Cargo.toml"), toml)?;
+
+    let body = cfg.wrapper_body.replace("{crate_ident}", &crate_ident);
+    std::fs::write(dir.join("src").join("lib.rs"), body)?;
+
+    // No `rust-toolchain.toml` is written for the wrapper.
+    //
+    // A wrapper under a data dir has no toolchain file above it, so cargo uses the
+    // current default toolchain — which is what we want: whatever toolchain you were
+    // already using. Pinning a channel would instead trigger an unexpected rustup
+    // download during install.
+    //
+    // The host and the plugin do not need the same toolchain anyway; the only thing
+    // crossing the boundary is `#[repr(C)]` data.
+
+    Ok(())
+}
+
+/// A path written for a TOML string: forward slashes, and never the Windows verbatim
+/// prefix.
+///
+/// Two things go wrong otherwise. Backslashes would be read as TOML escapes; and a
+/// canonicalized Windows path starts with `\\?\`, which cargo parses as a path URL and
+/// rejects outright (`invalid path url` once the separators are slashes). Both are silent
+/// until a build fails on Windows only, so this is the one place paths become strings.
+fn slash(path: &Path) -> String {
+    let raw = path.display().to_string();
+
+    let raw = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        // \\?\UNC\server\share -> \\server\share
+        format!(r"\\{rest}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw
+    };
+
+    raw.replace('\\', "/")
+}
+
+/// Runs `cargo metadata --format-version 1` for a manifest and hands back the raw JSON.
+pub(crate) fn cargo_metadata_json(
+    cargo: &Path,
+    manifest_path: &Path,
+) -> KitResult<serde_json::Value> {
+    let out = Command::new(cargo)
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .output()
+        .map_err(KitError::Io)?;
+
+    if !out.status.success() {
+        return Err(KitError::BuildFailed {
+            code: out.status.code(),
+        });
+    }
+
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| KitError::Registry(format!("failed to parse cargo metadata output: {e}")))
+}
+
+/// The contract dependency `crate_name` declares, as cargo resolved it.
+pub(crate) fn declared_contract_dep(
+    v: &serde_json::Value,
+    crate_name: &str,
+    contract: &str,
+) -> Option<ContractDep> {
+    let dep = v
+        .get("packages")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("name").and_then(|x| x.as_str()) == Some(crate_name))?
+        .get("dependencies")?
+        .as_array()?
+        .iter()
+        .find(|d| d.get("name").and_then(|x| x.as_str()) == Some(contract))?;
+
+    let req = dep.get("req").and_then(|x| x.as_str()).map(str::to_owned);
+    let path = dep.get("path").and_then(|x| x.as_str()).map(PathBuf::from);
+
+    if req.is_none() && path.is_none() {
+        return None;
+    }
+
+    Some(ContractDep { req, path })
+}
+
+/// The `[package]` identity of the crate whose manifest is `manifest_path`.
+///
+/// `cargo metadata` describes every member of the workspace the manifest belongs to,
+/// so the right package is picked by its manifest path — not by "the first one", which
+/// would silently pack a sibling crate in a multi-crate repository.
+pub(crate) fn package_identity(
+    v: &serde_json::Value,
+    manifest_path: &Path,
+) -> KitResult<(String, String)> {
+    let packages = v
+        .get("packages")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| KitError::NoPackage {
+            manifest: manifest_path.to_path_buf(),
+        })?;
+
+    let wanted = manifest_path
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_path.to_path_buf());
+
+    let found = packages.iter().find(|p| {
+        p.get("manifest_path")
+            .and_then(|x| x.as_str())
+            .map(PathBuf::from)
+            .map(|mp| mp.canonicalize().unwrap_or(mp) == wanted)
+            .unwrap_or(false)
+    });
+
+    let pkg = match found {
+        Some(p) => p,
+        // A single-member manifest: cargo reports exactly one package, so the match by
+        // path is redundant rather than wrong. Anything else is a genuine ambiguity.
+        None if packages.len() == 1 => &packages[0],
+        None => {
+            return Err(KitError::NoPackage {
+                manifest: manifest_path.to_path_buf(),
+            })
+        }
+    };
+
+    let name = pkg
+        .get("name")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| KitError::NoPackage {
+            manifest: manifest_path.to_path_buf(),
+        })?;
+    let version = pkg.get("version").and_then(|x| x.as_str()).ok_or_else(|| {
+        KitError::ManifestMissingField {
+            field: "package.version".to_string(),
+            path: manifest_path.to_path_buf(),
+        }
+    })?;
+
+    Ok((name.to_string(), version.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn cfg() -> KitConfig {
+        let mut c = KitConfig::new("myapp");
+        c.contract_version = "0.1".to_string();
+        c.wrapper_body = "myapp_plugin::export!({crate_ident}::create);\n".to_string();
+        c.lock_timeout = Duration::from_millis(500);
+        c
+    }
+
+    fn write_into(
+        c: &KitConfig,
+        plugin: PluginSource<'_>,
+        contract: Option<&ContractDep>,
+    ) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("wrapper");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let stem = c.lib_stem("myapp-plugin-foo");
+        write(c, &dir, "myapp-plugin-foo", &stem, plugin, contract).unwrap();
+        tmp
+    }
+
+    fn toml_of(tmp: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(tmp.path().join("wrapper").join("Cargo.toml")).unwrap()
+    }
+
+    fn metadata_with(dep_name: &str, req: &str) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [
+                { "name": "unrelated" },
+                {
+                    "name": "myapp-plugin-foo",
+                    "dependencies": [
+                        { "name": "serde", "req": "^1" },
+                        { "name": dep_name, "req": req },
+                    ],
+                },
+            ],
+        })
+    }
+
+    /// The packing path: the plugin is a checkout, and the wrapper still calls
+    /// `export!` — that is the one thing that makes the cdylib loadable.
+    #[test]
+    fn a_local_plugin_becomes_a_path_dependency_and_still_exports() {
+        let c = cfg();
+        let tmp = write_into(
+            &c,
+            PluginSource::Path {
+                dir: Path::new("/local/plugin-foo"),
+            },
+            None,
+        );
+
+        let toml = toml_of(&tmp);
+        assert!(
+            toml.contains(r#"myapp-plugin-foo = { path = "/local/plugin-foo" }"#),
+            "{toml}"
+        );
+
+        let body =
+            std::fs::read_to_string(tmp.path().join("wrapper").join("src").join("lib.rs")).unwrap();
+        assert_eq!(body, "myapp_plugin::export!(myapp_plugin_foo::create);\n");
+    }
+
+    #[test]
+    fn reads_the_requirement_the_plugin_declares() {
+        let v = metadata_with("myapp-plugin", "=0.0.3");
+        assert_eq!(
+            declared_contract_dep(&v, "myapp-plugin-foo", "myapp-plugin"),
+            Some(ContractDep {
+                req: Some("=0.0.3".to_string()),
+                path: None,
+            })
+        );
+    }
+
+    /// A plugin that does not depend on the contract crate at all leaves the caller on
+    /// the configured fallback rather than inventing something.
+    #[test]
+    fn a_missing_requirement_is_none() {
+        let v = metadata_with("something-else", "^2");
+        assert_eq!(
+            declared_contract_dep(&v, "myapp-plugin-foo", "myapp-plugin"),
+            None
+        );
+        assert_eq!(
+            declared_contract_dep(&v, "not-in-the-graph", "myapp-plugin"),
+            None
+        );
+    }
+
+    /// A checkout that points at the contract crate by path keeps that path: the
+    /// release path has to work before the contract crate is published anywhere.
+    #[test]
+    fn a_path_dependency_on_the_contract_crate_is_mirrored() {
+        let v = serde_json::json!({
+            "packages": [{
+                "name": "myapp-plugin-foo",
+                "dependencies": [{
+                    "name": "myapp-plugin",
+                    "req": "^0.1.0",
+                    "path": "/local/contract",
+                }],
+            }],
+        });
+
+        let dep = declared_contract_dep(&v, "myapp-plugin-foo", "myapp-plugin").unwrap();
+        assert_eq!(dep.path, Some(PathBuf::from("/local/contract")));
+
+        let c = cfg();
+        let tmp = write_into(&c, PluginSource::Registry { version: "0.1.0" }, Some(&dep));
+        assert!(
+            toml_of(&tmp)
+                .contains(r#"myapp-plugin   = { path = "/local/contract", version = "^0.1.0" }"#),
+            "{}",
+            toml_of(&tmp)
+        );
+    }
+
+    #[test]
+    fn picks_the_package_by_manifest_path() {
+        let v = serde_json::json!({
+            "packages": [
+                { "name": "sibling", "version": "9.9.9", "manifest_path": "/repo/sibling/Cargo.toml" },
+                { "name": "mine", "version": "0.1.0", "manifest_path": "/repo/mine/Cargo.toml" },
+            ],
+        });
+
+        let got = package_identity(&v, Path::new("/repo/mine/Cargo.toml")).unwrap();
+        assert_eq!(got, ("mine".to_string(), "0.1.0".to_string()));
+    }
+
+    #[test]
+    fn a_single_package_manifest_needs_no_path_match() {
+        let v = serde_json::json!({
+            "packages": [{ "name": "only", "version": "0.2.0", "manifest_path": "/elsewhere/Cargo.toml" }],
+        });
+
+        assert_eq!(
+            package_identity(&v, Path::new("/repo/Cargo.toml")).unwrap(),
+            ("only".to_string(), "0.2.0".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unknown_package_is_an_error() {
+        let v = serde_json::json!({
+            "packages": [
+                { "name": "a", "version": "1.0.0", "manifest_path": "/repo/a/Cargo.toml" },
+                { "name": "b", "version": "1.0.0", "manifest_path": "/repo/b/Cargo.toml" },
+            ],
+        });
+
+        assert!(matches!(
+            package_identity(&v, Path::new("/repo/c/Cargo.toml")),
+            Err(KitError::NoPackage { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_metadata_is_an_error() {
+        assert!(matches!(
+            package_identity(&serde_json::json!({}), Path::new("/repo/Cargo.toml")),
+            Err(KitError::NoPackage { .. })
+        ));
+    }
+
+    #[test]
+    fn paths_are_written_with_forward_slashes() {
+        assert_eq!(slash(Path::new(r"D:\local\plugin")), "D:/local/plugin");
+        assert_eq!(slash(Path::new("/local/plugin")), "/local/plugin");
+    }
+
+    /// `canonicalize()` on Windows returns a verbatim path (`\\?\C:\...`), and cargo
+    /// rejects that spelling inside a manifest: with the separators turned into slashes it
+    /// becomes `//?/C:/...`, which is not a valid path URL. The prefix has to go.
+    #[test]
+    fn the_verbatim_prefix_is_stripped() {
+        assert_eq!(
+            slash(Path::new(r"\\?\C:\Users\me\plugin")),
+            "C:/Users/me/plugin"
+        );
+        assert_eq!(
+            slash(Path::new(r"\\?\UNC\server\share\plugin")),
+            "//server/share/plugin"
+        );
+    }
+}

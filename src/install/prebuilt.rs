@@ -66,7 +66,7 @@ pub fn try_install(
     };
 
     let target = cfg.effective_target();
-    let ext = platform_lib_ext();
+    let ext = crate::loader::lib_ext_for_target(target);
     let base = format!("https://github.com/{owner}/{name}/releases/download/v{version}/{crate_name}-{version}-{target}");
 
     let lib_url = format!("{base}.{ext}");
@@ -115,15 +115,6 @@ pub fn try_install(
         library: dest_lib,
         source: InstallSource::Prebuilt,
     }))
-}
-
-/// cdylib extension for the current platform.
-fn platform_lib_ext() -> &'static str {
-    match std::env::consts::OS {
-        "windows" => "dll",
-        "macos" => "dylib",
-        _ => "so",
-    }
 }
 
 /// Extracts `(owner, repo)` from a GitHub URL.

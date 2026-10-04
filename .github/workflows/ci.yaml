@@ -56,11 +56,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # Includes the integration test: it really runs `cargo build` on a fixture
+      # Includes the integration tests: `load.rs` really runs `cargo build` on a fixture
       # cdylib, copies it into a temporary plugin store, then `dlopen`s it and calls a
-      # function pointer across the boundary.
+      # function pointer across the boundary; `pack.rs` really packs a fixture plugin
+      # checkout and loads what came out.
       - name: Test
         run: cargo test --locked
+
+      # The tool plugin releases call. Running it here proves the bin target is wired up
+      # and that argument handling works, before an author installs it.
+      - name: The asset tool runs
+        if: runner.os == 'Linux'
+        run: cargo run --locked --bin plugin-asset -- --version
 
       - name: Docs
         env:
@@ -75,7 +82,14 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/package-target
-        run: cargo package --locked
+        run: |
+          set -euo pipefail
+          cargo package --locked
+
+          # The tool has to be inside the .crate, or `cargo install crate-plugin-kit
+          # --bin plugin-asset` cannot work for anybody.
+          cargo package --list --allow-dirty | grep -qx 'src/bin/plugin-asset.rs'
+          echo "the package carries the asset tool"
 
       # "No async runtime anywhere in the stack" is a promise written down in the
       # README. Without this check it is only a sentence — a dependency could pull

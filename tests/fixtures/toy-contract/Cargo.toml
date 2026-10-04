@@ -1,0 +1,12 @@
+[package]
+name = "toyapp-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Single-element workspace. This fixture lives inside the kit's own repository, and
+# without this table cargo would walk up and claim it for the kit's workspace.
+[workspace]
+
+[lib]
+name = "toyapp_plugin"

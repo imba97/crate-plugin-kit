@@ -1,0 +1,19 @@
+[package]
+name = "toyapp-plugin-toy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Single-element workspace, for the same reason as the contract fixture next to it.
+[workspace]
+
+# A plain rlib, exactly like a real plugin crate: the cdylib is produced by the wrapper
+# that is generated for it, so this crate has no `#[no_mangle]` of its own.
+[lib]
+name = "toyapp_plugin_toy"
+crate-type = ["rlib"]
+
+[dependencies]
+# By path, with a version as well — the shape `pack` has to mirror. A release has to be
+# buildable before anything is published anywhere.
+toyapp-plugin = { path = "../toy-contract", version = "0.1.0" }

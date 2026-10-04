@@ -141,19 +141,37 @@ fn is_symbol_not_found(e: &libloading::Error) -> bool {
     }
 }
 
-/// The cdylib file name candidates for this platform, in priority order.
+/// The cdylib extension implied by a target triple.
+///
+/// Derived from the triple rather than from the running host: the same function names
+/// the assets a release publishes (`install::prebuilt` looks them up) and the artifact a
+/// local build produced (`crate::pack`), and those two must agree even when the build
+/// targets a triple other than the host's.
+pub fn lib_ext_for_target(target: &str) -> &'static str {
+    if target.contains("windows") {
+        "dll"
+    } else if target.contains("apple") || target.contains("darwin") {
+        "dylib"
+    } else {
+        "so"
+    }
+}
+
+/// The file name a cdylib has on the platform of `target`.
+fn lib_file_name_for_target(stem: &str, target: &str) -> String {
+    match lib_ext_for_target(target) {
+        "dll" => format!("{stem}.dll"),
+        ext => format!("lib{stem}.{ext}"),
+    }
+}
+
+/// The cdylib file name candidates for `target`, in priority order.
 ///
 /// Other platforms' spellings are listed as well, so that when a wrong-platform
 /// artifact sits in the install dir the error message can show what was tried
 /// instead of only saying "not found".
-pub fn library_candidates(stem: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    match std::env::consts::OS {
-        "windows" => out.push(format!("{stem}.dll")),
-        "macos" => out.push(format!("lib{stem}.dylib")),
-        _ => out.push(format!("lib{stem}.so")),
-    }
+pub fn library_candidates_for_target(stem: &str, target: &str) -> Vec<String> {
+    let mut out = vec![lib_file_name_for_target(stem, target)];
 
     // Fallbacks: some build systems (or hand-made archives) omit the `lib` prefix
     // or use a different extension.
@@ -168,10 +186,20 @@ pub fn library_candidates(stem: &str) -> Vec<String> {
     out
 }
 
+/// The cdylib file name candidates for this build's target, in priority order.
+pub fn library_candidates(stem: &str) -> Vec<String> {
+    library_candidates_for_target(stem, crate::TARGET_TRIPLE)
+}
+
 /// Finds a cdylib in a directory by walking the candidate list, returning the first
 /// one that exists.
 pub fn find_library(dir: &Path, stem: &str) -> KitResult<PathBuf> {
-    let candidates = library_candidates(stem);
+    find_library_for_target(dir, stem, crate::TARGET_TRIPLE)
+}
+
+/// [`find_library`], for a specific target triple.
+pub fn find_library_for_target(dir: &Path, stem: &str, target: &str) -> KitResult<PathBuf> {
+    let candidates = library_candidates_for_target(stem, target);
 
     for name in &candidates {
         let p = dir.join(name);
@@ -269,6 +297,55 @@ mod tests {
         std::fs::create_dir(dir.path().join(want)).unwrap();
 
         assert!(find_library(dir.path(), "myapp_plugin_foo").is_err());
+    }
+
+    /// The extension is a property of the target, not of whatever machine happens to be
+    /// running: `pack` names assets for the triple it built, and `prebuilt` looks them up
+    /// by the triple it was compiled for.
+    #[test]
+    fn the_extension_follows_the_target() {
+        assert_eq!(lib_ext_for_target("x86_64-unknown-linux-gnu"), "so");
+        assert_eq!(lib_ext_for_target("aarch64-unknown-linux-musl"), "so");
+        assert_eq!(lib_ext_for_target("x86_64-pc-windows-msvc"), "dll");
+        assert_eq!(lib_ext_for_target("aarch64-pc-windows-msvc"), "dll");
+        assert_eq!(lib_ext_for_target("x86_64-apple-darwin"), "dylib");
+        assert_eq!(lib_ext_for_target("aarch64-apple-darwin"), "dylib");
+    }
+
+    #[test]
+    fn candidates_are_ordered_for_the_target_not_the_host() {
+        // A Windows target on any host: the `.dll` spelling has to come first, otherwise
+        // an artifact from a previous build of another platform could win.
+        let c = library_candidates_for_target("stem", "x86_64-pc-windows-msvc");
+        assert_eq!(c.first().map(String::as_str), Some("stem.dll"));
+
+        let c = library_candidates_for_target("stem", "x86_64-apple-darwin");
+        assert_eq!(c.first().map(String::as_str), Some("libstem.dylib"));
+
+        let c = library_candidates_for_target("stem", "x86_64-unknown-linux-gnu");
+        assert_eq!(c.first().map(String::as_str), Some("libstem.so"));
+    }
+
+    /// Every platform's spelling is still reachable, so a wrong-platform artifact in the
+    /// directory produces a useful error rather than "not found".
+    #[test]
+    fn target_candidates_keep_every_fallback() {
+        let c = library_candidates_for_target("stem", "x86_64-pc-windows-msvc");
+        for name in ["stem.dll", "libstem.dylib", "libstem.so", "stem.so"] {
+            assert!(c.iter().any(|x| x == name), "missing {name}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn find_library_for_target_finds_another_platforms_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        // A Linux artifact, looked up for a Linux target: the `lib` prefix is what the
+        // build actually produces there.
+        std::fs::write(dir.path().join("libstem.so"), b"x").unwrap();
+
+        let found = find_library_for_target(dir.path(), "stem", "x86_64-unknown-linux-gnu")
+            .expect("should be found");
+        assert_eq!(found.file_name().unwrap().to_string_lossy(), "libstem.so");
     }
 
     /// Opening a file that is not a dynamic library at all must report

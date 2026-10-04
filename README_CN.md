@@ -80,6 +80,15 @@ libxxx.so / xxx.dll / libxxx.dylib
 cargo add crate-plugin-kit
 ```
 
+### 产物工具（只给插件作者用）
+
+```bash
+cargo install crate-plugin-kit --bin plugin-asset
+```
+
+可选，**使用**本库不需要它。它负责产出插件发版时要上传的那两个文件 —— 见
+[prebuilt 产物](#prebuilt-产物)。
+
 ### 环境要求
 
 - **Rust 1.88+** 用于构建（即 MSRV —— `libloading` 0.9 要求 1.88）。
@@ -185,8 +194,40 @@ let entry: *const MyHostEntry = plugin.entry();
 ```
 
 例如 `myapp-plugin-foo-0.1.0-x86_64-pc-windows-msvc.dll` 加上配套的 `.toml`。
+
+### 怎么产出
+
+本库自带产出这两个文件的工具，于是发版侧不需要再实现一遍 wrapper、lib 名和命名约定：
+
+```bash
+cargo install crate-plugin-kit --bin plugin-asset
+plugin-asset --id myapp
+# dist/myapp-plugin-foo-0.1.0-x86_64-unknown-linux-gnu.so
+# dist/myapp-plugin-foo-0.1.0-x86_64-unknown-linux-gnu.toml
+```
+
+`--id` 就是宿主传给 `KitConfig::new` 的那个字符串。在插件仓库里直接跑即可；
+`--manifest-path`、`--out-dir`、`--target`、`--target-dir` 都可覆盖（`--help` 有全表）。
+如果插件 manifest 的 `[plugin] version` 与 `Cargo.toml` 的版本不一致它会**拒绝执行**；
+而当构建目标就是本机时，它还会 `dlopen` 一下产物，确认入口符号真的导出了。
+
+所以发布矩阵只需要列出为哪个 target 构建，一个 target 一个 runner：
+
+| Runner | 目标三元组 | 产物扩展名 |
+| --- | --- | --- |
+| `ubuntu-latest` | `x86_64-unknown-linux-gnu` | `.so` |
+| `windows-latest` | `x86_64-pc-windows-msvc` | `.dll` |
+| `macos-13` | `x86_64-apple-darwin` | `.dylib` |
+| `macos-14` | `aarch64-apple-darwin` | `.dylib` |
+
+扩展名跟着**目标三元组**走，不跟着打包机器走；安装时的查找则跟着宿主自己的三元组走 ——
+于是某个产物只会被同 target 的宿主使用，没人用的 target 永远不会被下载。
+
+### 怎么被找到
+
 仓库地址取自 crates.io 上该 crate 的 `repository` 字段 —— 此时插件还没装上，
-唯一能问的就是 registry。
+唯一能问的就是 registry。两个文件都挂在该仓库的 `v{version}` tag 上；`.toml` 里的版本
+必须与请求的版本一致，否则下载会被拒绝。
 
 ## manifest 从哪来
 

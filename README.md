@@ -85,6 +85,15 @@ be unit-tested with a plain `use` without going anywhere near `dlopen`, and its 
 cargo add crate-plugin-kit
 ```
 
+### The asset tool (plugin authors only)
+
+```bash
+cargo install crate-plugin-kit --bin plugin-asset
+```
+
+Optional, and not needed to *use* the library. It is what produces the files a plugin release
+publishes — see [Prebuilt assets](#prebuilt-assets).
+
 ### Requirements
 
 - **Rust 1.88+** to build (the MSRV — `libloading` 0.9 requires 1.88).
@@ -193,9 +202,45 @@ Two **raw files** rather than an archive, which saves pulling in the tar, gzip a
 {crate}-{version}-{target}.toml             ← the manifest
 ```
 
-For example `myapp-plugin-foo-0.1.0-x86_64-pc-windows-msvc.dll` plus the matching `.toml`. The
-repository URL comes from the crate's `repository` field on crates.io — at that point the plugin
-is not installed yet, so the registry is the only thing that can be asked.
+For example `myapp-plugin-foo-0.1.0-x86_64-pc-windows-msvc.dll` plus the matching `.toml`.
+
+### Producing them
+
+This crate ships the tool that writes both files, so a release does not need a second
+implementation of the wrapper, the lib name, or the naming convention:
+
+```bash
+cargo install crate-plugin-kit --bin plugin-asset
+plugin-asset --id myapp
+# dist/myapp-plugin-foo-0.1.0-x86_64-unknown-linux-gnu.so
+# dist/myapp-plugin-foo-0.1.0-x86_64-unknown-linux-gnu.toml
+```
+
+`--id` is the same string the host passes to `KitConfig::new`. Run it in the plugin's checkout;
+`--manifest-path`, `--out-dir`, `--target` and `--target-dir` are all overridable (`--help`
+lists them). It refuses to run when the plugin manifest's `[plugin] version` and `Cargo.toml`'s
+version disagree, and — when the target is the machine it is running on — it `dlopen`s the
+result to confirm the entry symbol is really exported.
+
+So a release matrix only has to name the target it builds for, one runner per target:
+
+| Runner | Target triple | Asset extension |
+| --- | --- | --- |
+| `ubuntu-latest` | `x86_64-unknown-linux-gnu` | `.so` |
+| `windows-latest` | `x86_64-pc-windows-msvc` | `.dll` |
+| `macos-13` | `x86_64-apple-darwin` | `.dylib` |
+| `macos-14` | `aarch64-apple-darwin` | `.dylib` |
+
+The extension follows the target triple, not the machine doing the packing, and the lookup at
+install time follows the host's own triple — so an asset is only ever used by a host built for
+the same target. An asset for a triple nobody runs is simply never downloaded.
+
+### How they are found
+
+The repository URL comes from the crate's `repository` field on crates.io — at that point the
+plugin is not installed yet, so the registry is the only thing that can be asked. Both files sit
+on the tag `v{version}` of that repository; the version inside the `.toml` has to match, or the
+download is rejected.
 
 ## Where the manifest comes from
 
