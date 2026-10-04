@@ -94,6 +94,18 @@ cargo install crate-plugin-kit --bin plugin-asset
 Optional, and not needed to *use* the library. It is what produces the files a plugin release
 publishes — see [Prebuilt assets](#prebuilt-assets).
 
+Every release also carries the same tool as a prebuilt archive, so it can be installed
+without compiling it:
+
+```bash
+cargo binstall crate-plugin-kit --bin plugin-asset
+```
+
+That downloads `crate-plugin-kit-<target>.{tar.gz,zip}` from the release and unpacks
+`plugin-asset` + `LICENSE` out of the top level. `cargo install` stays the documented
+default — it works everywhere, including behind a mirror; `cargo binstall` goes straight to
+GitHub and is seconds instead of minutes.
+
 ### Requirements
 
 - **Rust 1.88+** to build (the MSRV — `libloading` 0.9 requires 1.88).

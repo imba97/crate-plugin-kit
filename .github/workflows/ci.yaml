@@ -88,8 +88,24 @@ jobs:
 
           # The tool has to be inside the .crate, or `cargo install crate-plugin-kit
           # --bin plugin-asset` cannot work for anybody.
-          cargo package --list --allow-dirty | grep -qx 'src/bin/plugin-asset.rs'
+          #
+          # Matched by directory rather than by file name: this check used to name
+          # `src/bin/plugin-asset.rs`, and when that file became a directory the check kept
+          # passing locally and would have failed on the next release.
+          cargo package --list --allow-dirty | grep -q '^src/bin/plugin-asset/'
           echo "the package carries the asset tool"
+
+      # The release scripts are what a tag runs. A syntax error in one of them would first
+      # show up while publishing, which is the worst moment to find it -- so both are parsed
+      # here. Both shells exist on the Linux runner, so one step covers both.
+      - name: The release scripts parse
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/package-release.sh
+          pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw scripts/package-release.ps1))'
+          echo "both packaging scripts parse"
 
       # "No async runtime anywhere in the stack" is a promise written down in the
       # README. Without this check it is only a sentence — a dependency could pull

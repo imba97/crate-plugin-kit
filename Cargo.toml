@@ -37,3 +37,16 @@ which = "8.0.6"
 
 [dev-dependencies]
 tempfile = "3"
+
+# `cargo binstall crate-plugin-kit` unpacks the archive from the release and would otherwise
+# look for the binary inside a directory named after the crate. Ours are flat -- `plugin-asset`
+# sits at the archive root next to `LICENSE` -- so the path inside the archive is the only
+# thing that has to be spelled out. `{ bin }` is what keeps this right even though the
+# binary's name (`plugin-asset`) differs from the crate's.
+#
+# Everything else stays at binstall's defaults on purpose: the archive is named after the
+# crate (`crate-plugin-kit-<target>`, one of the filenames it tries), and `.tar.gz` is one of
+# the extensions it accepts for its `tgz` format.
+[package.metadata.binstall]
+bin-dir = "{ bin }{ binary-ext }"
+

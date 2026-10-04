@@ -6,7 +6,12 @@ name: Release
 # "this version is already in the registry" counts as done, not as an error.
 #
 # The checks live in ci.yaml and are called from here. Keeping them in the same run
-# is what makes the ordering structural.
+# is what makes the ordering structural. The release archives are delegated the same
+# way, to assets.yaml.
+#
+# One tag produces both halves of a release: the crates.io publish, and the archive that
+# lets CI (and anybody else) install `plugin-asset` without compiling it. They share the
+# same gate (`checks`) but not each other — see the note on the assets job.
 
 on:
   push:
@@ -70,7 +75,7 @@ jobs:
       # The release tool. What this job used to compute in shell — tag validation,
       # token validation, the publish loop — is now one harbor command.
       - name: Install the release tool
-        run: cargo install harbor --locked
+        run: cargo install harbor --version 0.1.3 --locked
 
       # Two gates plus a plan in one command: the tag name matches the version in the
       # manifest, the registry token exists and is non-empty, and the publish plan can
@@ -94,3 +99,24 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo harbor publish
+
+  # ---------------------------------------------------------------------------
+  # The release archive and its checksum -- see assets.yaml, which owns that pipeline.
+  #
+  # Called from here rather than triggered by its own `on: push: tags`, so it cannot run
+  # before `checks` has passed: "an artifact never lands on a tag whose checks failed" is
+  # then structural, not a matter of which workflow happened to start first.
+  #
+  # It does **not** wait for the crates.io publish. The archive is built from this tag's
+  # source, and nothing in the download path goes through the registry -- the five plugin
+  # repositories install this tool from the archive, so a slow index or a registry outage
+  # would otherwise delay (or stop) a release that has nothing to do with either.
+  # ---------------------------------------------------------------------------
+  assets:
+    name: Archive
+    needs: [ checks ]
+    uses: ./.github/workflows/assets.yaml
+    permissions:
+      # The called workflow can only narrow this; it needs to write to the release.
+      contents: write
+

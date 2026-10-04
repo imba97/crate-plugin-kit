@@ -1,0 +1,161 @@
+name: Assets
+
+# The archives a release ships, plus the checksum file that lets a downloader prove they are
+# the bytes that were built.
+#
+#   crate-plugin-kit-<target>.tar.gz   (Unix)     -> plugin-asset + LICENSE, at the top level
+#   crate-plugin-kit-<target>.zip      (Windows)  -> plugin-asset.exe + LICENSE
+#   SHA256SUMS
+#
+# Both the names and the layout are interfaces:
+#
+#   * `cargo binstall crate-plugin-kit` builds its URL from the name -- the **crate** name,
+#     versionless, which is one of the filenames binstall tries by default -- and finds the
+#     binary through `bin-dir` in `Cargo.toml`, because the binary is called `plugin-asset`
+#     and sits at the archive root.
+#   * `.tar.gz` is one of the extensions binstall accepts for its `tgz` format, so no
+#     `pkg-fmt` or `pkg-url` override is needed.
+#
+# Why this exists at all: five plugin repositories install this tool in each of their four
+# asset jobs, and without a prebuilt archive every one of those twenty runs compiles it from
+# source. `cargo install crate-plugin-kit --bin plugin-asset` still works and stays the
+# documented default; these archives are what let CI (and a user) skip the build.
+#
+# It is a **reusable workflow** rather than a second `on: push: tags` workflow on purpose.
+# Being called from release.yaml means it runs only after `checks` has passed, so "never
+# attach an artifact to a tag whose checks failed" is structural instead of a matter of
+# timing two independent runs.
+#
+# `workflow_dispatch` exists to exercise the pipeline against an existing tag: these runners
+# only exist on GitHub, so without it the first real run would be the next release. It
+# rebuilds from the named tag's source and overwrites what is there.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to attach the archives to. Empty = the tag that started the run.
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to attach the archives to (rebuilt from that tag's source)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  archives:
+    name: Archive (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      # One runner per target: an archive is only usable by a machine of that triple, and the
+      # triple is part of the name. Adding one is two lines.
+      #   `macos-13` is retired; `macos-15-intel` is its replacement, and plain `macos-15` is
+      #   the Apple silicon image.
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      # Granted by the caller as well: a called workflow can only narrow permissions.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # On a manual run the workflow is running against a branch, so the archive has to be
+          # built from the tag that was named -- otherwise the bytes of main would land on an
+          # old release.
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      # `shell: bash` on every runner: it exists on all three, and it keeps this step from
+      # being one script on Linux and another on Windows.
+      - name: Install stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The same script a maintainer runs locally, so a release can be reproduced without
+      # going through CI at all.
+      - name: Build the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            pwsh -NoProfile -File scripts/package-release.ps1 -Target ${{ matrix.target }}
+          else
+            bash scripts/package-release.sh ${{ matrix.target }}
+          fi
+
+      # The release object is created here. Every matrix leg tries, so "already exists" and
+      # losing that race are not failures; only the upload has to succeed.
+      - name: Upload it to the tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --notes "Release $tag" \
+            || true
+          gh release upload "$tag" dist/* --clobber
+          echo "assets now on the release:"
+          gh release view "$tag" --json assets --jq '.assets[].name'
+
+  # ---------------------------------------------------------------------------
+  # SHA256SUMS.
+  #
+  # One file for every archive, so it is built here rather than by each runner: all four
+  # targets have to be listed together, whatever machine produced them.
+  # ---------------------------------------------------------------------------
+  checksums:
+    name: SHA256SUMS
+    needs: [ archives ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # `gh` works out which repository it is talking to from the git remote, and this job reads
+    # no source, so the repository is named in the environment as well. Both are here on
+    # purpose: the failure without either is "fatal: not a git repository", which is
+    # invisible until the tag is already out.
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Hash every archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          cd dist
+          gh release download "$tag" --pattern 'crate-plugin-kit-*' --clobber
+
+          # Bare asset names, so `sha256sum -c SHA256SUMS` works in the directory someone has
+          # just downloaded into.
+          sha256sum crate-plugin-kit-* > ../SHA256SUMS
+          cat ../SHA256SUMS
+
+      - name: Upload it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" SHA256SUMS --clobber
