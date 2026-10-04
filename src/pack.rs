@@ -21,8 +21,9 @@
 //! 1. `cargo metadata` the plugin's manifest, for the crate name and version.
 //! 2. Check that the plugin manifest beside it declares the same version — a manifest
 //!    that lags behind `Cargo.toml` would publish assets nobody can consume.
-//! 3. Generate the wrapper ([`crate::wrapper`]) with the plugin as a **path**
-//!    dependency, and `cargo build --release --target <triple>` it.
+//! 3. Generate the wrapper — the same one [`crate::install`] builds, coming from the
+//!    private `wrapper` module — with the plugin as a **path** dependency, and
+//!    `cargo build --release --target <triple>` it.
 //! 4. Copy the cdylib and the plugin manifest into the output directory under the names
 //!    above, and — when the build target is this machine — `dlopen` the result to prove
 //!    it really exports the entry symbol.

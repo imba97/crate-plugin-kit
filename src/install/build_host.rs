@@ -7,9 +7,9 @@
 //! cannot be installed that way. And `cargo build` on a plugin crate directly does
 //! not make Cargo produce a cdylib for a dependency either.
 //!
-//! So a wrapper project of a few dozen lines is generated — see [`crate::wrapper`],
-//! which owns the generated files and is shared with [`crate::pack`] (the release-asset
-//! path, where the same wrapper is built from a local checkout):
+//! So a wrapper project of a few dozen lines is generated. The generator itself lives in
+//! the private `wrapper` module, because [`crate::pack`] — the release-asset path — builds
+//! the exact same wrapper from a local checkout:
 //!
 //! ```text
 //! <build>/<crate>/
@@ -56,8 +56,8 @@ pub fn install(
     let stem = cfg.lib_stem(crate_name);
 
     // Ask the plugin crate what it declares about the contract crate, and have the wrapper ask
-    // for exactly the same thing. Getting this wrong is not cosmetic: see [`crate::wrapper`] for
-    // what two disagreeing requirements do to the build.
+    // for exactly the same thing. Getting this wrong is not cosmetic: the private `wrapper`
+    // module explains what two disagreeing requirements do to the build.
     let probe_dir = paths.build_dir(&format!("{crate_name}-probe"));
     let contract = probe_contract_requirement(cfg, &cargo, &probe_dir, crate_name, version)?;
     remove_dir_if_exists(&probe_dir)?;
@@ -128,9 +128,9 @@ pub fn install(
 
 // ---- wrapper generation ---------------------------------------------------
 //
-// The generated files live in [`crate::wrapper`], because [`crate::pack`] builds the same
-// wrapper from a local checkout. What stays here is the part that is specific to installing
-// from a registry: asking cargo what the *published* crate declares.
+// The generated files live in the private `wrapper` module, because `crate::pack` builds the
+// same wrapper from a local checkout. What stays here is the part that is specific to
+// installing from a registry: asking cargo what the *published* crate declares.
 
 /// Copies the manifest from the plugin source dir into the install dir.
 fn copy_manifest(cfg: &KitConfig, plugin_dir: &Path, plugin_src: Option<&Path>) -> KitResult<()> {
