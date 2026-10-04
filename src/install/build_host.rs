@@ -51,7 +51,28 @@ pub fn install(
     std::fs::create_dir_all(wrapper_dir.join("src"))?;
 
     let stem = cfg.lib_stem(crate_name);
-    write_wrapper(cfg, &wrapper_dir, crate_name, version, &stem)?;
+
+    // Ask the plugin crate what it requires of the contract crate, and have the wrapper ask for
+    // exactly the same thing.
+    //
+    // Getting this wrong is not a cosmetic problem. If the two requirements resolve to
+    // different versions, the graph holds two copies of the contract crate; each defines its
+    // own `PackageManager`, and the `export!` in the wrapper stops typechecking with an E0308
+    // that the plugin author has no way to see coming. Cargo will not unify them for us even
+    // when one version satisfies both, because 0.0.x releases are incompatible across patches
+    // by definition. Copying the plugin's own requirement makes the two agree by construction.
+    let probe_dir = paths.build_dir(&format!("{crate_name}-probe"));
+    let contract_req = probe_contract_requirement(cfg, &cargo, &probe_dir, crate_name, version)?;
+    remove_dir_if_exists(&probe_dir)?;
+
+    write_wrapper(
+        cfg,
+        &wrapper_dir,
+        crate_name,
+        version,
+        &stem,
+        contract_req.as_deref(),
+    )?;
 
     let manifest_path = wrapper_dir.join("Cargo.toml");
 
@@ -116,6 +137,7 @@ fn write_wrapper(
     crate_name: &str,
     version: &str,
     stem: &str,
+    contract_req: Option<&str>,
 ) -> KitResult<()> {
     let crate_ident = crate_name.replace('-', "_");
 
@@ -144,7 +166,7 @@ crate-type = ["cdylib"]
         stem = stem,
         version = version,
         contract = cfg.contract_crate,
-        contract_version = cfg.contract_version,
+        contract_version = contract_req.unwrap_or(cfg.contract_version.as_str()),
     );
 
     // Local path overrides: during development, point the plugin and the contract
@@ -216,7 +238,8 @@ impl Metadata {
     }
 }
 
-fn cargo_metadata(cargo: &Path, manifest_path: &Path) -> KitResult<Metadata> {
+/// Run `cargo metadata` for a manifest and hand back the raw JSON.
+fn cargo_metadata_json(cargo: &Path, manifest_path: &Path) -> KitResult<serde_json::Value> {
     let out = Command::new(cargo)
         .arg("metadata")
         .arg("--format-version")
@@ -232,8 +255,64 @@ fn cargo_metadata(cargo: &Path, manifest_path: &Path) -> KitResult<Metadata> {
         });
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| KitError::Registry(format!("failed to parse cargo metadata output: {e}")))?;
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| KitError::Registry(format!("failed to parse cargo metadata output: {e}")))
+}
+
+/// The requirement `crate_name` itself declares on `contract`.
+///
+/// Taken from the plugin crate's own manifest, which is the only place that knows it.
+fn declared_contract_requirement(
+    v: &serde_json::Value,
+    crate_name: &str,
+    contract: &str,
+) -> Option<String> {
+    v.get("packages")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("name").and_then(|x| x.as_str()) == Some(crate_name))?
+        .get("dependencies")?
+        .as_array()?
+        .iter()
+        .find(|d| d.get("name").and_then(|x| x.as_str()) == Some(contract))?
+        .get("req")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Ask cargo what the plugin crate requires of the contract crate.
+///
+/// Needs its own throwaway manifest, because the answer is needed *before* the wrapper's
+/// manifest can be written -- and it cannot be read off the wrapper, since the wrapper is where
+/// the question comes from in the first place.
+fn probe_contract_requirement(
+    cfg: &KitConfig,
+    cargo: &Path,
+    dir: &Path,
+    crate_name: &str,
+    version: &str,
+) -> KitResult<Option<String>> {
+    std::fs::create_dir_all(dir.join("src"))?;
+    // Its own workspace, so the wrapper's Cargo.toml above it does not claim it.
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
+             [workspace]\n\n[dependencies]\n{crate_name} = \"={version}\"\n"
+        ),
+    )?;
+    std::fs::write(dir.join("src").join("lib.rs"), "")?;
+
+    let v = cargo_metadata_json(cargo, &dir.join("Cargo.toml"))?;
+    Ok(declared_contract_requirement(
+        &v,
+        crate_name,
+        &cfg.contract_crate,
+    ))
+}
+
+fn cargo_metadata(cargo: &Path, manifest_path: &Path) -> KitResult<Metadata> {
+    let v = cargo_metadata_json(cargo, manifest_path)?;
 
     let target_directory = v
         .get("target_directory")
@@ -278,12 +357,19 @@ mod tests {
     }
 
     fn generate(c: &KitConfig) -> (tempfile::TempDir, PathBuf) {
+        generate_with_contract(c, None)
+    }
+
+    fn generate_with_contract(
+        c: &KitConfig,
+        contract_req: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("build").join("myapp-plugin-foo");
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
         let stem = c.lib_stem("myapp-plugin-foo");
-        write_wrapper(c, &dir, "myapp-plugin-foo", "0.1.0", &stem).unwrap();
+        write_wrapper(c, &dir, "myapp-plugin-foo", "0.1.0", &stem, contract_req).unwrap();
         (tmp, dir)
     }
 
@@ -341,6 +427,60 @@ mod tests {
         assert!(toml.contains(r#""0.1""#), "{toml}");
     }
 
+    /// When the plugin's own manifest declares a requirement, the wrapper has to repeat it
+    /// verbatim. Anything else and cargo may resolve two versions of the contract crate.
+    #[test]
+    fn the_plugins_own_requirement_wins() {
+        let c = cfg();
+        let (_tmp, dir) = generate_with_contract(&c, Some("=0.0.3"));
+        let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+
+        assert!(toml.contains(r#"myapp-plugin   = "=0.0.3""#), "{toml}");
+        assert!(
+            !toml.contains(r#""0.1""#),
+            "the fallback must not leak in: {toml}"
+        );
+    }
+
+    fn metadata_with(dep_name: &str, req: &str) -> serde_json::Value {
+        serde_json::json!({
+            "packages": [
+                { "name": "unrelated" },
+                {
+                    "name": "myapp-plugin-foo",
+                    "dependencies": [
+                        { "name": "serde", "req": "^1" },
+                        { "name": dep_name, "req": req },
+                    ],
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn reads_the_requirement_the_plugin_declares() {
+        let v = metadata_with("myapp-plugin", "=0.0.3");
+        assert_eq!(
+            declared_contract_requirement(&v, "myapp-plugin-foo", "myapp-plugin").as_deref(),
+            Some("=0.0.3")
+        );
+    }
+
+    /// A plugin that does not depend on the contract crate at all leaves the caller on the
+    /// configured fallback rather than inventing something.
+    #[test]
+    fn a_missing_requirement_is_none() {
+        let v = metadata_with("something-else", "^2");
+        assert_eq!(
+            declared_contract_requirement(&v, "myapp-plugin-foo", "myapp-plugin"),
+            None
+        );
+        assert_eq!(
+            declared_contract_requirement(&v, "not-in-the-graph", "myapp-plugin"),
+            None
+        );
+    }
+
     #[test]
     fn body_substitutes_the_crate_ident() {
         let c = cfg();
@@ -363,7 +503,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
         let stem = c.lib_stem("myapp-plugin-a-b");
-        write_wrapper(&c, &dir, "myapp-plugin-a-b", "0.1.0", &stem).unwrap();
+        write_wrapper(&c, &dir, "myapp-plugin-a-b", "0.1.0", &stem, None).unwrap();
 
         let body = std::fs::read_to_string(dir.join("src").join("lib.rs")).unwrap();
         assert_eq!(body, "myapp_plugin::export!(myapp_plugin_a_b::create);\n");

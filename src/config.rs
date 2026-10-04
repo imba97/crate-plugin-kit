@@ -47,7 +47,13 @@ pub struct KitConfig {
     /// wrapper project depends on it.
     pub contract_crate: String,
 
-    /// Version requirement for the contract crate, such as `"0.1"`.
+    /// Fallback version requirement for the contract crate, such as `"0.1"`.
+    ///
+    /// Normally unused. The wrapper repeats whatever the plugin crate's own manifest requires
+    /// of the contract crate, which is the only way to guarantee both resolve to one version:
+    /// cargo treats differently-versioned copies as distinct crates, each with its own traits,
+    /// and will not merge them even when a single version satisfies both requirements. This
+    /// value is only consulted when the plugin's manifest declares no such dependency.
     pub contract_version: String,
 
     /// Edition used by the generated wrapper project.
@@ -99,8 +105,9 @@ impl KitConfig {
     /// | `entry_symbol` | `myapp_plugin_entry_v1` |
     /// | `contract_crate` | `myapp-plugin` |
     ///
-    /// `wrapper_body` (its paths come from the host's contract crate) and
-    /// `contract_version` still have to be filled in by hand.
+    /// `wrapper_body` still has to be filled in by hand when the contract crate's path differs
+    /// from the derivation above. `contract_version` does not: it is a fallback, and the wrapper
+    /// normally repeats whatever the plugin crate's own manifest requires.
     ///
     /// `entry_symbol` does not need a trailing NUL — `libloading` adds it.
     pub fn new(id: impl Into<String>) -> Self {
