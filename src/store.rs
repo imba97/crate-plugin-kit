@@ -1,20 +1,21 @@
-//! [`CratePluginKit`]：本 crate 的门面。
+//! [`CratePluginKit`]: the facade of this crate.
 //!
-//! # 泛型参数 `T`
+//! # The generic parameter `T`
 //!
-//! `T` 是**宿主自己的 `#[repr(C)]` 入口结构体**。本 crate 不使用它的任何字段 ——
-//! 它只出现在 [`CratePluginKit::load`] 的返回类型里，用来把 `dlopen` 出来的符号
-//! 转成一个**瘦指针** `*const T`。
+//! `T` is the host's own `#[repr(C)]` entry struct. This crate does not use any of
+//! its fields — it only appears in the return type of [`CratePluginKit::load`], to
+//! turn the symbol `dlopen` produced into a thin pointer `*const T`.
 //!
-//! 这样就没有"类型擦除 → 还原"那一层：不存在两个 vtable 之间的 `fat pointer` 互转，
-//! 也就没有那类 UB。
+//! That removes the "type erasure → restore" layer: there is no conversion of a fat
+//! pointer between two vtables, and therefore no UB of that kind.
 //!
-//! # 线程安全
+//! # Thread safety
 //!
-//! [`CratePluginKit`] 内部有一个 `RefCell` 记录"本进程加载过哪些插件"（用于
-//! [`CratePluginKit::uninstall`] 拒绝删除正在使用的库）。因此它**不是 `Sync`** ——
-//! 一个进程里建一个、串行用即可（CLI 就是这种用法）。需要并发的话，把 kit 放在
-//! 各线程自己的作用域里。
+//! [`CratePluginKit`] holds a `RefCell` recording which plugins this process has
+//! loaded (used by [`CratePluginKit::uninstall`] to refuse deleting a library that
+//! is in use). It is therefore not `Sync` — build one per process and use it
+//! serially (which is what a CLI does). To go concurrent, give each thread its own
+//! kit in its own scope.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -30,40 +31,42 @@ use crate::lock::FileLock;
 use crate::manifest::PluginManifest;
 use crate::registry::{CrateInfo, CrateSummary, Registry};
 
-/// 一个已安装插件的概览。
+/// An overview of one installed plugin.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
-    /// 插件自报名（manifest 的 `plugin.name`）。
+    /// Plugin's self-declared name (the manifest's `plugin.name`).
     pub name: String,
-    /// 完整 crate 名，如 `bmux-plugin-cargo`。
+    /// Full crate name, such as `bmux-plugin-cargo`.
     pub crate_name: String,
-    /// 版本。
+    /// Version.
     pub version: String,
-    /// 生态分组（宿主自用字段，可能为空）。
+    /// Ecosystem family (a host field; may be empty).
     pub family: Option<String>,
-    /// ABI 版本（宿主自用字段，可能为空）。
+    /// ABI version (a host field; may be empty).
     pub abi: Option<u32>,
-    /// 安装目录。
+    /// Install dir.
     pub dir: PathBuf,
-    /// 怎么装进来的。
+    /// How it got installed.
     pub source: InstallSource,
 }
 
-/// 通用插件管理库。
+/// Generic plugin management library.
 ///
-/// 建一个、串行用。
+/// Build one and use it serially.
 pub struct CratePluginKit<T> {
     cfg: KitConfig,
     paths: KitPaths,
     registry: Registry,
-    /// 本进程已经 `dlopen` 过的 crate 名。`uninstall` 拿它挡"删正在用的库"。
+    /// Crate names this process has `dlopen`ed. `uninstall` uses it to refuse
+    /// deleting a library that is in use.
     loaded: RefCell<BTreeSet<String>>,
-    /// `fn() -> T` 而不是 `T`：不假装拥有 `T`，也不要求 `T: Send/Sync`。
+    /// `fn() -> T` rather than `T`: does not pretend to own a `T`, and does not
+    /// require `T: Send/Sync`.
     _host: PhantomData<fn() -> T>,
 }
 
 impl<T> CratePluginKit<T> {
-    /// 按配置建一个 kit 实例。会创建数据目录。
+    /// Builds a kit instance from the config. Creates the data directories.
     pub fn new(cfg: KitConfig) -> KitResult<Self> {
         let paths = cfg.paths()?;
         std::fs::create_dir_all(&paths.plugins)?;
@@ -80,31 +83,33 @@ impl<T> CratePluginKit<T> {
         })
     }
 
-    /// 配置。
+    /// Config.
     pub fn config(&self) -> &KitConfig {
         &self.cfg
     }
 
-    /// 各项路径。
+    /// The various paths.
     pub fn paths(&self) -> &KitPaths {
         &self.paths
     }
 
-    /// registry 客户端。
+    /// Registry client.
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
 
-    // ---- 安装 / 卸载 ------------------------------------------------------
+    // ---- install / uninstall ----------------------------------------------
 
-    /// 安装一个插件。
+    /// Installs a plugin.
     ///
-    /// `name` 可以写短名（`"cargo"`，会自动补 [`KitConfig::crate_prefix`]），
-    /// 也可以写完整 crate 名。`version` 给 `None` 就去 crates.io 查最新版。
+    /// `name` may be a short name (`"cargo"`, to which [`KitConfig::crate_prefix`]
+    /// is prepended) or a full crate name. With `version` set to `None`, the latest
+    /// version is looked up on crates.io.
     ///
     /// # Errors
     ///
-    /// - [`KitError::AlreadyInstalled`]：已经装过了。用 [`Self::update`] 替换。
+    /// - [`KitError::AlreadyInstalled`]: it is already installed. Use [`Self::update`]
+    ///   to replace it.
     pub fn install(&self, name: &str, version: Option<&str>) -> KitResult<Installed> {
         let crate_name = self.cfg.normalize_crate_name(name);
 
@@ -124,7 +129,7 @@ impl<T> CratePluginKit<T> {
         Ok(installed)
     }
 
-    /// 更新（或重装）一个插件。已存在就替换，不存在就当安装。
+    /// Updates (or reinstalls) a plugin. Replaces it if present, installs it if not.
     pub fn update(&self, name: &str, version: Option<&str>) -> KitResult<Installed> {
         let crate_name = self.cfg.normalize_crate_name(name);
 
@@ -136,14 +141,15 @@ impl<T> CratePluginKit<T> {
         Ok(installed)
     }
 
-    /// 卸载一个插件。
+    /// Uninstalls a plugin.
     ///
     /// # Errors
     ///
-    /// - [`KitError::NotInstalled`]：本来就没装。
-    /// - [`KitError::PluginPanicked`] 之外的一个"正在使用"错误：本进程加载过它的库。
-    ///   Windows 上正在 `dlopen` 的 `.dll` 删不掉；Linux 上删得掉但空间不回收。
-    ///   与其赌，不如让用户换一个干净的进程。
+    /// - [`KitError::NotInstalled`]: it was not installed in the first place.
+    /// - [`KitError::PluginInUse`]: this process has loaded its library. A `.dll`
+    ///   that is currently `dlopen`ed cannot be deleted on Windows; on Linux the
+    ///   removal succeeds but the disk space is not reclaimed. Rather than gamble on
+    ///   it, ask the user to retry from a clean process.
     pub fn uninstall(&self, name: &str) -> KitResult<()> {
         let crate_name = self.cfg.normalize_crate_name(name);
 
@@ -169,12 +175,13 @@ impl<T> CratePluginKit<T> {
         Ok(())
     }
 
-    // ---- 查询 ------------------------------------------------------------
+    // ---- queries ----------------------------------------------------------
 
-    /// 列出已安装的插件。
+    /// Lists the installed plugins.
     ///
-    /// **以磁盘上的 manifest 为准**，`.plugins.json` 只用来补充"来源 / 安装时间"
-    /// 这类 manifest 里没有的信息。所以缓存丢了也不会漏插件。
+    /// The manifests on disk are authoritative; `.plugins.json` only supplies
+    /// information the manifest does not carry, such as the source and install time.
+    /// A lost cache therefore never hides a plugin.
     pub fn list(&self) -> KitResult<Vec<PluginInfo>> {
         let idx = Index::load(&self.paths.index_file);
         let mut out = Vec::new();
@@ -192,7 +199,8 @@ impl<T> CratePluginKit<T> {
             }
             let crate_name = entry.file_name().to_string_lossy().into_owned();
 
-            // 目录在但 manifest 没了/坏了 —— 跳过，不要因为一个坏插件让整个 list 失败
+            // The directory is there but the manifest is missing or broken: skip it,
+            // so one bad plugin cannot make the whole list fail
             let manifest_path = entry.path().join(&self.cfg.manifest_name);
             let Ok(manifest) = PluginManifest::read(&manifest_path) else {
                 continue;
@@ -215,7 +223,7 @@ impl<T> CratePluginKit<T> {
         Ok(out)
     }
 
-    /// 读某个插件的 manifest。
+    /// Reads the manifest of one plugin.
     pub fn manifest_of(&self, name: &str) -> KitResult<PluginManifest> {
         let crate_name = self.cfg.normalize_crate_name(name);
         let path = self
@@ -224,17 +232,17 @@ impl<T> CratePluginKit<T> {
         PluginManifest::read(&path)
     }
 
-    /// 把 `name` 下的相对路径解析成绝对路径。
+    /// Resolves a path relative to `name` into an absolute path.
     pub fn resolve(&self, name: &str, relative: impl AsRef<Path>) -> PathBuf {
         let crate_name = self.cfg.normalize_crate_name(name);
         self.paths.plugin_dir(&crate_name).join(relative)
     }
 
-    // ---- 加载 ------------------------------------------------------------
+    // ---- loading ----------------------------------------------------------
 
-    /// 加载插件，拿到 `*const T`。
+    /// Loads a plugin and returns a `*const T`.
     ///
-    /// 加载过之后 [`Self::uninstall`] 会拒绝删除它，直到进程退出。
+    /// Once loaded, [`Self::uninstall`] refuses to delete it until the process exits.
     pub fn load(&self, name: &str) -> KitResult<LoadedPlugin<T>> {
         let crate_name = self.cfg.normalize_crate_name(name);
 
@@ -243,8 +251,9 @@ impl<T> CratePluginKit<T> {
         let stem = manifest.effective_lib_stem(&self.cfg, &crate_name);
         let lib_path = loader::find_library(&dir, &stem)?;
 
-        // SAFETY: `lib_path` 是本 kit 装出来的；`T` 与它导出的结构体布局是否一致
-        // 由宿主的 abi_version 字段兜底 —— 那是宿主契约 crate 的职责，不是本 crate 的。
+        // SAFETY: `lib_path` was installed by this kit; whether the layout of `T`
+        // matches the struct it exports is covered by the host's abi_version field —
+        // that is the host contract crate's job, not this crate's.
         let plugin = unsafe { loader::open::<T>(&lib_path, &self.cfg.entry_symbol)? };
 
         self.loaded.borrow_mut().insert(crate_name);
@@ -253,24 +262,24 @@ impl<T> CratePluginKit<T> {
 
     // ---- registry --------------------------------------------------------
 
-    /// 搜 crate。
+    /// Searches for crates.
     pub fn search(&self, keyword: &str, limit: usize) -> KitResult<Vec<CrateSummary>> {
         self.registry.search(keyword, limit)
     }
 
-    /// 按精确名查 crate。
+    /// Looks up a crate by exact name.
     pub fn view(&self, name: &str) -> KitResult<Option<CrateInfo>> {
         let crate_name = self.cfg.normalize_crate_name(name);
         self.registry.view(&crate_name)
     }
 
-    // ---- 内部 ------------------------------------------------------------
+    // ---- internals -------------------------------------------------------
 
     fn lock(&self) -> KitResult<FileLock> {
         FileLock::acquire(&self.paths.lock_file, self.cfg.lock_timeout)
     }
 
-    /// 没给版本就查最新版。
+    /// Looks up the latest version when none was given.
     fn resolve_version(&self, crate_name: &str, version: Option<&str>) -> KitResult<String> {
         if let Some(v) = version {
             return Ok(v.to_string());
@@ -278,27 +287,29 @@ impl<T> CratePluginKit<T> {
         match self.registry.view(crate_name)? {
             Some(info) if !info.version.is_empty() => Ok(info.version),
             Some(_) => Err(KitError::Registry(format!(
-                "{crate_name} 在 registry 上没有可用版本"
+                "no usable version of {crate_name} in the registry"
             ))),
             None => Err(KitError::Registry(format!(
-                "registry 上找不到 {crate_name}"
+                "{crate_name} was not found in the registry"
             ))),
         }
     }
 
-    /// 真正的安装动作。调用方必须已经持锁。
+    /// The actual install. The caller must already hold the lock.
     fn install_locked(&self, crate_name: &str, version: &str) -> KitResult<Installed> {
-        // 先把旧目录清掉（update 路径）
+        // Clear the old directory first (the update path)
         install::remove_dir_if_exists(&self.paths.plugin_dir(crate_name))?;
 
         if self.cfg.prefer_prebuilt {
             match prebuilt::try_install(&self.cfg, &self.paths, &self.registry, crate_name, version)
             {
                 Ok(Some(installed)) => return Ok(installed),
-                // 没有 prebuilt 资产 —— 这正是回落 build-host 的信号
+                // No prebuilt asset — this is exactly the signal to fall back to
+                // build-host
                 Ok(None) => {}
-                // 网络坏 / 资产损坏：也回落。build-host 走的是 cargo，
-                // 跟 GitHub 是两条路，很可能反而能通。
+                // Broken network or a corrupt asset: fall back as well. build-host
+                // goes through cargo, which is a different route from GitHub and may
+                // well work.
                 Err(_) => {}
             }
         }
@@ -336,9 +347,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// 测试用的宿主 ABI 结构体。
+    /// A host ABI struct for tests.
     ///
-    /// 内容是任意的 —— 这个 crate 从不读 `T` 的字段，它只把符号 cast 成 `*const T`。
+    /// Its contents are arbitrary — this crate never reads a field of `T`, it only
+    /// casts the symbol to `*const T`.
     #[repr(C)]
     struct FakeEntry {
         abi_version: u32,
@@ -359,10 +371,10 @@ strong = ["fake.lock"]
         let cfg = KitConfig::new("myapp")
             .with_data_dir(root)
             .with_lock_timeout(Duration::from_millis(500));
-        CratePluginKit::new(cfg).expect("应当能建起来")
+        CratePluginKit::new(cfg).expect("should build")
     }
 
-    /// 手工放一个"已安装"的插件目录，省掉编译步骤。
+    /// Lays out an "installed" plugin directory by hand, skipping the compile step.
     fn place_plugin(root: &Path, crate_name: &str) -> PathBuf {
         let dir = root.join("plugins").join(crate_name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -376,8 +388,14 @@ strong = ["fake.lock"]
         let root = tmp.path().join("store");
 
         let k = kit(&root);
-        assert!(k.paths().plugins.is_dir(), "plugins 目录应当被建出来");
-        assert!(k.paths().build.is_dir(), "build 目录应当被建出来");
+        assert!(
+            k.paths().plugins.is_dir(),
+            "the plugins dir should have been created"
+        );
+        assert!(
+            k.paths().build.is_dir(),
+            "the build dir should have been created"
+        );
     }
 
     #[test]
@@ -387,7 +405,8 @@ strong = ["fake.lock"]
         assert!(k.list().unwrap().is_empty());
     }
 
-    /// 目录根本不存在时，`list` 也该给空列表而不是报错。
+    /// When the directory does not exist at all, `list` still returns an empty list
+    /// instead of an error.
     #[test]
     fn list_tolerates_a_missing_plugins_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -398,8 +417,9 @@ strong = ["fake.lock"]
         assert!(k.list().unwrap().is_empty());
     }
 
-    /// **关键行为**：磁盘上的 manifest 才是事实来源，不是 `.plugins.json`。
-    /// 手工放进去的插件（缓存里没有记录）也必须被列出来。
+    /// Key behavior: the manifest on disk is the source of truth, not
+    /// `.plugins.json`. A plugin placed by hand (with no cache entry) must still be
+    /// listed.
     #[test]
     fn list_reads_manifests_from_disk_not_the_cache() {
         let tmp = tempfile::tempdir().unwrap();
@@ -409,18 +429,18 @@ strong = ["fake.lock"]
         place_plugin(&root, "myapp-plugin-foo");
 
         let all = k.list().unwrap();
-        assert_eq!(all.len(), 1, "缓存是空的，但磁盘上有插件");
+        assert_eq!(all.len(), 1, "the cache is empty but the disk has a plugin");
         let info = &all[0];
         assert_eq!(info.name, "foo");
         assert_eq!(info.crate_name, "myapp-plugin-foo");
         assert_eq!(info.version, "0.1.0");
         assert_eq!(info.abi, Some(1));
         assert_eq!(info.family.as_deref(), Some("node"));
-        // 缓存里没有记录 → 落到默认来源
+        // No cache entry → falls back to the default source
         assert_eq!(info.source, InstallSource::BuildHost);
     }
 
-    /// 坏掉的 manifest 不该让整个 `list()` 失败 —— 跳过它就好。
+    /// A broken manifest must not fail the whole `list()` — skipping it is enough.
     #[test]
     fn list_skips_a_directory_with_a_broken_manifest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -432,12 +452,12 @@ strong = ["fake.lock"]
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("myapp-plugin.toml"), "this is not toml").unwrap();
 
-        // 连 manifest 都没有的目录
+        // A directory that does not even have a manifest
         let empty = root.join("plugins").join("myapp-plugin-empty");
         std::fs::create_dir_all(&empty).unwrap();
 
         let all = k.list().unwrap();
-        assert_eq!(all.len(), 1, "只应当列出好的那个：{all:?}");
+        assert_eq!(all.len(), 1, "only the good one should be listed: {all:?}");
         assert_eq!(all[0].crate_name, "myapp-plugin-good");
     }
 
@@ -470,9 +490,11 @@ strong = ["fake.lock"]
         let k = kit(&root);
         place_plugin(&root, "myapp-plugin-foo");
 
-        let m = k.manifest_of("foo").expect("短名应当也能用");
+        let m = k
+            .manifest_of("foo")
+            .expect("the short name should work too");
         assert_eq!(m.plugin.name, "foo");
-        assert!(m.extra.contains_key("detect"), "宿主的段要保留");
+        assert!(m.extra.contains_key("detect"), "the host's section is kept");
     }
 
     #[test]
@@ -504,14 +526,16 @@ strong = ["fake.lock"]
         let dir = place_plugin(&root, "myapp-plugin-foo");
 
         assert!(dir.is_dir());
-        k.uninstall("foo").expect("应当能卸掉");
-        assert!(!dir.exists(), "目录应当被删掉");
+        k.uninstall("foo").expect("should uninstall");
+        assert!(!dir.exists(), "the directory should have been deleted");
         assert!(k.list().unwrap().is_empty());
     }
 
-    /// `install` 不覆盖已有安装 —— 替换走 `update`。
+    /// `install` does not overwrite an existing installation — use `update` to
+    /// replace it.
     ///
-    /// 这个检查发生在取锁之后、任何网络/编译之前，所以测试不需要联网。
+    /// The check happens after the lock is taken and before any network or compile
+    /// work, so the test needs no network access.
     #[test]
     fn install_refuses_when_already_installed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -523,7 +547,7 @@ strong = ["fake.lock"]
             Err(KitError::AlreadyInstalled { name, .. }) => {
                 assert_eq!(name, "myapp-plugin-foo")
             }
-            other => panic!("期望 AlreadyInstalled，得到 {other:?}"),
+            other => panic!("expected AlreadyInstalled, got {other:?}"),
         }
     }
 
@@ -539,7 +563,7 @@ strong = ["fake.lock"]
                 .join("myapp-plugin-foo")
                 .join("extra.txt")
         );
-        // 短名与全名要落到同一个地方
+        // The short and the full name must land in the same place
         assert_eq!(k.resolve("foo", "x"), k.resolve("myapp-plugin-foo", "x"));
     }
 

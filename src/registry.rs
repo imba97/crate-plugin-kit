@@ -1,55 +1,56 @@
-//! crates.io 查询。
+//! crates.io queries.
 //!
-//! 只用两个接口：
+//! Only two endpoints are used:
 //!
-//! | 用途 | 接口 |
+//! | Purpose | Endpoint |
 //! | ---- | ---- |
-//! | 按关键词搜 | `GET {registry}/api/v1/crates?q=<kw>&per_page=N` |
-//! | 按精确名查 | `GET {registry}/api/v1/crates/<name>` |
+//! | Search by keyword | `GET {registry}/api/v1/crates?q=<kw>&per_page=N` |
+//! | Look up by exact name | `GET {registry}/api/v1/crates/<name>` |
 //!
-//! `registry` 可以指向镜像（见 [`crate::KitConfig::registry`]）。
+//! `registry` may point at a mirror (see [`crate::KitConfig::registry`]).
 //!
-//! crates.io **要求带 `User-Agent`**，不带会被 403。这里用宿主 id + 本 crate 版本拼。
+//! crates.io requires a `User-Agent` and answers 403 without one. It is built from
+//! the host id plus this crate's version.
 
 use serde::Deserialize;
 
 use crate::config::KitConfig;
 use crate::error::{KitError, KitResult};
 
-/// 一条搜索结果。
+/// One search result.
 #[derive(Debug, Clone)]
 pub struct CrateSummary {
-    /// crate 名。
+    /// Crate name.
     pub name: String,
-    /// 最新版本。
+    /// Latest version.
     pub version: String,
-    /// 描述。
+    /// Description.
     pub description: Option<String>,
-    /// 总下载量。
+    /// Total download count.
     pub downloads: u64,
 }
 
-/// 某个 crate 的详细信息。
+/// Detailed information about one crate.
 #[derive(Debug, Clone)]
 pub struct CrateInfo {
-    /// crate 名。
+    /// Crate name.
     pub name: String,
-    /// 最新版本。
+    /// Latest version.
     pub version: String,
-    /// 描述。
+    /// Description.
     pub description: Option<String>,
-    /// 源码仓库地址（prebuilt 下载要靠它拼 Release URL）。
+    /// Source repository URL (prebuilt downloads build the Release URL from it).
     pub repository: Option<String>,
 }
 
-/// crates.io 客户端。
+/// crates.io client.
 #[derive(Debug, Clone)]
 pub struct Registry {
     base: String,
     user_agent: String,
 }
 
-// ---- 线上返回的 JSON 形状 ------------------------------------------------
+// ---- JSON shapes returned by the API ---------------------------------------
 
 #[derive(Deserialize)]
 struct SearchResponse {
@@ -86,13 +87,14 @@ struct ViewCrate {
 }
 
 impl Registry {
-    /// 按配置建一个客户端。
+    /// Builds a client from the config.
     pub fn new(cfg: &KitConfig) -> Self {
         Self {
             base: cfg.registry.trim_end_matches('/').to_string(),
-            // crates.io 要求 User-Agent 里带联系方式，否则可能被限流。
-            // 仓库地址取自 `Cargo.toml` 的 `repository` 字段（Cargo 编译期注入），
-            // 这样它不会和 manifest 脱节。
+            // crates.io wants contact information in the User-Agent, otherwise the
+            // requests may be rate-limited. The repository URL comes from
+            // `Cargo.toml`'s `repository` field (injected by Cargo at compile time)
+            // so that it cannot drift away from the manifest.
             user_agent: format!(
                 "{} (crate-plugin-kit/{}; +{})",
                 cfg.id,
@@ -102,7 +104,7 @@ impl Registry {
         }
     }
 
-    /// 按关键词搜索。
+    /// Searches by keyword.
     pub fn search(&self, keyword: &str, limit: usize) -> KitResult<Vec<CrateSummary>> {
         let url = format!(
             "{}/api/v1/crates?q={}&per_page={}",
@@ -113,7 +115,7 @@ impl Registry {
         let text = self.get_text(&url)?;
 
         let parsed: SearchResponse = serde_json::from_str(&text)
-            .map_err(|e| KitError::Registry(format!("搜索结果解析失败：{e}")))?;
+            .map_err(|e| KitError::Registry(format!("failed to parse search results: {e}")))?;
 
         Ok(parsed
             .crates
@@ -127,19 +129,19 @@ impl Registry {
             .collect())
     }
 
-    /// 按精确名查询。不存在返回 `Ok(None)`。
+    /// Looks up an exact name. Returns `Ok(None)` when it does not exist.
     pub fn view(&self, name: &str) -> KitResult<Option<CrateInfo>> {
         let url = format!("{}/api/v1/crates/{}", self.base, percent_encode(name));
 
         let text = match self.get_text(&url) {
             Ok(t) => t,
-            // 404 是"这个 crate 不存在"，不是错误。
+            // A 404 means "this crate does not exist", which is not an error.
             Err(KitError::Http(msg)) if msg.contains("404") => return Ok(None),
             Err(e) => return Err(e),
         };
 
         let parsed: ViewResponse = serde_json::from_str(&text)
-            .map_err(|e| KitError::Registry(format!("查询结果解析失败：{e}")))?;
+            .map_err(|e| KitError::Registry(format!("failed to parse lookup result: {e}")))?;
 
         Ok(Some(CrateInfo {
             name: parsed.krate.name,
@@ -158,22 +160,23 @@ impl Registry {
 
         res.body_mut()
             .read_to_string()
-            .map_err(|e| KitError::Http(format!("读取响应体失败（{url}）：{e}")))
+            .map_err(|e| KitError::Http(format!("failed to read response body ({url}): {e}")))
     }
 
-    /// 下载一个文件到内存。**用不到就返回 `Ok(None)`**（404 等）。
+    /// Downloads one file into memory. Returns `Ok(None)` when there is nothing to
+    /// download (a 404, for instance).
     ///
-    /// prebuilt 路径用它取单个产物文件。
+    /// The prebuilt path uses it to fetch a single artifact file.
     pub fn try_download(&self, url: &str, limit_bytes: u64) -> KitResult<Option<Vec<u8>>> {
         match ureq::get(url).header("User-Agent", &self.user_agent).call() {
             Ok(mut res) => {
                 let body = res
                     .body_mut()
                     .read_to_vec()
-                    .map_err(|e| KitError::Http(format!("读取 {url} 失败：{e}")))?;
+                    .map_err(|e| KitError::Http(format!("failed to read {url}: {e}")))?;
                 if body.len() as u64 > limit_bytes {
                     return Err(KitError::Http(format!(
-                        "{url} 超过大小上限（{} 字节 > {limit_bytes}）",
+                        "{url} exceeds the size limit ({} bytes > {limit_bytes})",
                         body.len()
                     )));
                 }
@@ -185,17 +188,20 @@ impl Registry {
     }
 }
 
-/// 把 ureq 的错误变成一句人能读的话（把状态码单独拎出来，调用方要判断 404）。
+/// Turns a ureq error into a sentence a human can read, with the status code pulled
+/// out on its own because callers need to detect 404.
 fn describe_ureq_error(e: &ureq::Error, url: &str) -> String {
     match e {
-        ureq::Error::StatusCode(code) => format!("HTTP {code}（{url}）"),
-        other => format!("{other}（{url}）"),
+        ureq::Error::StatusCode(code) => format!("HTTP {code} ({url})"),
+        other => format!("{other} ({url})"),
     }
 }
 
-/// 最小百分号编码：只放过 URL 里安全的字符。
+/// Minimal percent encoding: only the characters that are safe in a URL are left
+/// alone.
 ///
-/// 不引 `urlencoding` 之类的小依赖，就为这一个函数 —— crate 名和搜索词都不长。
+/// A dependency like `urlencoding` is not worth pulling in for this one function —
+/// crate names and search terms are short.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

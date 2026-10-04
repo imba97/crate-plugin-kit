@@ -1,7 +1,8 @@
-//! 安装记录缓存 `<plugins>/.plugins.json`。
+//! Install record cache `<plugins>/.plugins.json`.
 //!
-//! 这个文件是**加速与展示用**，不是事实来源 —— 事实来源永远是每个插件目录里的
-//! manifest。缓存丢了、坏了，`list()` 会从磁盘重建。
+//! This file is for speed and display only, never a source of truth — the source
+//! of truth is always the manifest in each plugin dir. If the cache is lost or
+//! corrupt, `list()` rebuilds from disk.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,17 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::KitResult;
 
-/// 当前缓存 schema 版本。
+/// Current cache schema version.
 pub const CACHE_VERSION: u32 = 1;
 
-/// `.plugins.json` 的内容。
+/// Contents of `.plugins.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
-    /// schema 版本。
+    /// Schema version.
     #[serde(rename = "cacheVersion", default = "default_cache_version")]
     pub cache_version: u32,
 
-    /// crate 名 → 安装记录。
+    /// Crate name → install record.
     #[serde(default)]
     pub plugins: BTreeMap<String, IndexEntry>,
 }
@@ -39,40 +40,42 @@ impl Default for Index {
     }
 }
 
-/// 一条安装记录。
+/// One install record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
-    /// 安装的版本。
+    /// Installed version.
     pub version: String,
 
-    /// manifest 里声明的 ABI 版本（宿主自用）。
+    /// ABI version declared by the manifest (for the host's own use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi: Option<u32>,
 
-    /// 安装目录的绝对路径。
+    /// Absolute path of the install dir.
     pub root: PathBuf,
 
-    /// 安装来源。
+    /// How it was installed.
     #[serde(default)]
     pub source: InstallSource,
 
-    /// 安装时刻（Unix 秒）。用整数而不是 RFC3339 字符串，省掉一个日期库依赖。
+    /// Install time (Unix seconds). An integer instead of an RFC3339 string, which
+    /// saves a date library dependency.
     #[serde(rename = "installedAt", default)]
     pub installed_at: u64,
 }
 
-/// 插件是怎么装进来的。
+/// How a plugin got installed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstallSource {
-    /// 从 GitHub Releases 下载的预编译产物。
+    /// Prebuilt artifact downloaded from GitHub Releases.
     Prebuilt,
-    /// 本地 `cargo build` 编译出来的（默认路径）。
+    /// Compiled locally by `cargo build` (the default path).
     #[default]
     BuildHost,
 }
 
-/// 当前 Unix 秒。取不到系统时间时返回 0（宁可时间戳不准，也不要让安装失败）。
+/// Current Unix seconds. Returns 0 when the system time is unavailable — a wrong
+/// timestamp beats a failed install.
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -81,7 +84,8 @@ pub fn now_unix() -> u64 {
 }
 
 impl Index {
-    /// 读缓存。文件不存在或解析失败都返回空索引 —— 缓存不是事实来源。
+    /// Reads the cache. A missing or unparsable file yields an empty index — the
+    /// cache is not a source of truth.
     pub fn load(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
@@ -95,13 +99,14 @@ impl Index {
         }
     }
 
-    /// 写缓存（原子替换：先写临时文件再 rename）。
+    /// Writes the cache (atomic replace: write a temp file, then rename).
     pub fn save(&self, path: &Path) -> KitResult<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string_pretty(self)
-            .map_err(|e| crate::error::KitError::Registry(format!("序列化索引失败：{e}")))?;
+        let text = serde_json::to_string_pretty(self).map_err(|e| {
+            crate::error::KitError::Registry(format!("failed to serialize index: {e}"))
+        })?;
 
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, text)?;
@@ -109,17 +114,17 @@ impl Index {
         Ok(())
     }
 
-    /// 记一条。
+    /// Records one entry.
     pub fn insert(&mut self, crate_name: &str, entry: IndexEntry) {
         self.plugins.insert(crate_name.to_string(), entry);
     }
 
-    /// 删一条。
+    /// Removes one entry.
     pub fn remove(&mut self, crate_name: &str) -> Option<IndexEntry> {
         self.plugins.remove(crate_name)
     }
 
-    /// 取一条。
+    /// Looks up one entry.
     pub fn get(&self, crate_name: &str) -> Option<&IndexEntry> {
         self.plugins.get(crate_name)
     }
@@ -160,7 +165,7 @@ mod tests {
 
         let mut idx = Index::default();
         idx.insert("myapp-plugin-foo", entry("0.2.0"));
-        idx.save(&path).expect("应当能落盘");
+        idx.save(&path).expect("should be able to write to disk");
 
         let back = Index::load(&path);
         assert_eq!(back.cache_version, CACHE_VERSION);
@@ -171,7 +176,8 @@ mod tests {
         assert_eq!(got.installed_at, 1_767_225_600);
     }
 
-    /// 缓存不是事实来源：文件不存在时给一个空索引，而不是报错。
+    /// The cache is not a source of truth: a missing file yields an empty index
+    /// rather than an error.
     #[test]
     fn a_missing_file_yields_an_empty_index() {
         let dir = tempfile::tempdir().unwrap();
@@ -180,7 +186,8 @@ mod tests {
         assert_eq!(idx.cache_version, CACHE_VERSION);
     }
 
-    /// 同上：文件坏了也只当空的，不把整个 `list()` 拖垮。
+    /// Same as above: a corrupt file is also treated as empty, so it cannot drag
+    /// down the whole `list()`.
     #[test]
     fn a_corrupt_file_yields_an_empty_index() {
         let dir = tempfile::tempdir().unwrap();
@@ -191,7 +198,8 @@ mod tests {
         assert!(idx.plugins.is_empty());
     }
 
-    /// 旧缓存里 `source` 字段可能缺失 —— 要能读回并落到默认值。
+    /// Older caches may lack the `source` field — it must read back and fall back
+    /// to the default.
     #[test]
     fn missing_optional_fields_fall_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -205,7 +213,8 @@ mod tests {
         assert_eq!(got.installed_at, 0);
     }
 
-    /// 保存是"先写临时文件再 rename"，所以不该留下 `.tmp` 残骸。
+    /// Saving writes a temp file and then renames, so no `.tmp` leftovers should
+    /// remain.
     #[test]
     fn save_leaves_no_temp_file_behind() {
         let dir = tempfile::tempdir().unwrap();
@@ -221,7 +230,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "留下了临时文件：{leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "left a temp file behind: {leftovers:?}"
+        );
     }
 
     #[test]

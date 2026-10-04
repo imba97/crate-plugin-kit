@@ -1,25 +1,30 @@
-//! prebuilt：从 GitHub Releases 直接下载 cdylib + manifest。
+//! prebuilt: downloads a cdylib plus manifest straight from GitHub Releases.
 //!
-//! 这是**加速路径**，不是默认路径。因为它走的是 GitHub，会绕开用户已经配好的
-//! cargo registry / 镜像 —— 国内环境往往连不上。所以：
+//! This is an accelerator path, not the default. It goes through GitHub, which
+//! bypasses the cargo registry or mirror the user has configured, so it may not be
+//! reachable:
 //!
-//! - 默认仍然是 build-host（走 `cargo build`，天然吃镜像配置）；
-//! - prebuilt 只在前者被显式关闭、或调用方想"先试试能不能省几分钟"时用；
-//! - 任何一步拿到 `None` 都表示"没有可用的 prebuilt"，调用方**必须回落 build-host**。
+//! - the default stays build-host (`cargo build`, which naturally picks up the mirror
+//!   configuration);
+//! - prebuilt is only used when build-host is explicitly turned off, or when the
+//!   caller wants to try saving a few minutes first;
+//! - a `None` from any step means "no usable prebuilt", and the caller must fall back
+//!   to build-host.
 //!
-//! # 产物命名约定
+//! # Artifact naming convention
 //!
-//! Release 里放**两个裸文件**（不是压缩包，省掉 tar/gzip/zip 三个依赖）：
+//! A release carries two bare files (not archives, which saves three dependencies —
+//! tar/gzip/zip):
 //!
 //! ```text
-//! {crate}-{version}-{target}.{so|dylib|dll}   ← cdylib 本体
-//! {crate}-{version}-{target}.toml             ← manifest
+//! {crate}-{version}-{target}.{so|dylib|dll}   <-- the cdylib itself
+//! {crate}-{version}-{target}.toml             <-- the manifest
 //! ```
 //!
-//! 例：`bmux-plugin-cargo-0.1.0-x86_64-pc-windows-msvc.dll`
+//! Example: `bmux-plugin-cargo-0.1.0-x86_64-pc-windows-msvc.dll`
 //!
-//! 仓库地址从 **crates.io 的 `repository` 字段**取 —— 因为此时插件还没装上，
-//! 我们唯一能问的就是 registry。
+//! The repository URL comes from the crates.io `repository` field — at this point the
+//! plugin is not installed yet, so the registry is the only thing we can ask.
 
 use std::path::PathBuf;
 
@@ -30,14 +35,17 @@ use crate::install::{remove_dir_if_exists, Installed};
 use crate::manifest::PluginManifest;
 use crate::registry::Registry;
 
-/// 单个产物的大小上限。防着"下到一个几百 MB 的东西"。
+/// Size limit for a single artifact. Guards against downloading something hundreds of
+/// megabytes large.
 const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 
-/// 试装 prebuilt。
+/// Tries to install a prebuilt.
 ///
-/// - `Ok(Some(_))`：装好了。
-/// - `Ok(None)`：没有可用的 prebuilt（没发、或者资产缺失），**调用方应回落 build-host**。
-/// - `Err(_)`：网络之类的硬错误。调用方**仍然可以**选择回落，但值得先把错误透出去。
+/// - `Ok(Some(_))`: installed.
+/// - `Ok(None)`: no usable prebuilt (none published, or assets missing); the caller
+///   should fall back to build-host.
+/// - `Err(_)`: a hard error such as a network failure. The caller may still fall back,
+///   but the error is worth surfacing first.
 pub fn try_install(
     cfg: &KitConfig,
     paths: &KitPaths,
@@ -45,7 +53,7 @@ pub fn try_install(
     crate_name: &str,
     version: &str,
 ) -> KitResult<Option<Installed>> {
-    // ① 仓库地址只能问 registry
+    // 1. the repository URL can only come from the registry
     let Some(info) = registry.view(crate_name)? else {
         return Ok(None);
     };
@@ -53,7 +61,7 @@ pub fn try_install(
         return Ok(None);
     };
     let Some((owner, name)) = parse_github_repo(repo) else {
-        // 不是 GitHub 就没有我们能猜的 Release URL
+        // Not GitHub, so there is no release URL we could guess
         return Ok(None);
     };
 
@@ -64,30 +72,32 @@ pub fn try_install(
     let lib_url = format!("{base}.{ext}");
     let manifest_url = format!("{base}.toml");
 
-    // ② 先取 cdylib。404 就是"没发 prebuilt"。
+    // 2. fetch the cdylib first. A 404 means "no prebuilt was published".
     let Some(lib_bytes) = registry.try_download(&lib_url, MAX_ASSET_BYTES)? else {
         return Ok(None);
     };
 
-    // ③ manifest 必须一起发出来。缺了它这个 prebuilt 不可用 ——
-    //    没有 manifest 就没法检测，装了也白装。
+    // 3. the manifest has to be published alongside it. Without it this prebuilt is
+    //    unusable — no manifest means nothing can be detected, so installing it
+    //    achieves nothing.
     let Some(manifest_bytes) = registry.try_download(&manifest_url, MAX_ASSET_BYTES)? else {
         return Ok(None);
     };
 
-    // ④ 内容要自洽：manifest 里写的名字和版本必须就是我们下的那个
+    // 4. the contents have to be consistent: the name and version in the manifest must
+    //    be the ones we just downloaded
     let manifest_text = String::from_utf8(manifest_bytes)
-        .map_err(|e| KitError::Registry(format!("{manifest_url} 不是合法 UTF-8：{e}")))?;
+        .map_err(|e| KitError::Registry(format!("{manifest_url} is not valid UTF-8: {e}")))?;
     let manifest = PluginManifest::parse(&manifest_text, &PathBuf::from(&manifest_url))?;
 
     if manifest.plugin.version != version {
         return Err(KitError::Registry(format!(
-            "prebuilt manifest 版本不符：资产声明 {}，要装的是 {version}",
+            "prebuilt manifest version mismatch: the asset declares {}, but {version} was requested",
             manifest.plugin.version
         )));
     }
 
-    // ⑤ 落地
+    // 5. land it
     let plugin_dir = paths.plugin_dir(crate_name);
     remove_dir_if_exists(&plugin_dir)?;
     std::fs::create_dir_all(&plugin_dir)?;
@@ -107,7 +117,7 @@ pub fn try_install(
     }))
 }
 
-/// 当前平台的 cdylib 扩展名。
+/// cdylib extension for the current platform.
 fn platform_lib_ext() -> &'static str {
     match std::env::consts::OS {
         "windows" => "dll",
@@ -116,9 +126,9 @@ fn platform_lib_ext() -> &'static str {
     }
 }
 
-/// 从 GitHub URL 里取出 `(owner, repo)`。
+/// Extracts `(owner, repo)` from a GitHub URL.
 ///
-/// 认这些形态：
+/// These forms are recognized:
 ///
 /// ```text
 /// https://github.com/owner/repo

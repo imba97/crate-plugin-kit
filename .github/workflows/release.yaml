@@ -1,50 +1,57 @@
 name: Release
 
-# 发布不是幂等的：一个 crate 名 + 版本号一旦发出去就永远不能复用，被 yank 的版本也
-# 不能取消 yank。所以这个 workflow 是**写成拒绝、而不是写成猜**的，并且在一次失败之后
-# 可以安全重跑 —— 因为"这个版本已经在 registry 上了"算完成，不算错误。
+# A release is not idempotent: once a crate name plus version is out it can never be
+# reused, and a yanked version cannot be un-yanked. So this workflow is written to
+# refuse rather than to guess, and it can be rerun safely after a failure — because
+# "this version is already in the registry" counts as done, not as an error.
 #
-# 检查放在 ci.yaml 里，由这里调用。把它们保持在同一次运行里，顺序才是结构性的。
+# The checks live in ci.yaml and are called from here. Keeping them in the same run
+# is what makes the ordering structural.
 
 on:
   push:
-    # 唯一的触发器：`v<major>.<minor>.<patch>` tag。
-    # 没有别的东西能启动一次运行，也就没有别的东西能碰到 registry，
-    # 而"release tag 长什么样"是在这里强制的，不是靠某个脚本记得去检查。
+    # The only trigger: a `v<major>.<minor>.<patch>` tag.
+    # Nothing else can start a run, so nothing else can reach the registry, and what a
+    # release tag looks like is enforced here rather than by a script remembering to
+    # check it.
     tags: [ "v*.*.*" ]
 
-# 默认只读；发布 job 也不再要求更多。
+# Read-only by default; the publish job does not ask for more either.
 permissions:
   contents: read
 
 jobs:
-  # 一切不需要凭据就能做的检查：格式、clippy、三个平台的测试、rustdoc、
-  # `cargo package`、无 async runtime、以及 MSRV 构建。
+  # Every check that needs no credentials: formatting, clippy, tests on all three
+  # platforms, rustdoc, `cargo package`, no async runtime, and the MSRV build.
   #
-  # 调用整个文件意味着 publish 会等它里面的**每一个** job（矩阵也算），
-  # 而不需要在这里把它们列一遍 —— 列一遍就会漏。
+  # Calling the whole file means publish waits for every job inside it (the matrix
+  # included), without listing them again here — a list would eventually miss one.
   checks:
     name: Checks
     uses: ./.github/workflows/ci.yaml
 
   # ---------------------------------------------------------------------------
-  # crates.io。
+  # crates.io.
   #
-  # 这是一个单 crate 仓库（`[workspace]` 下只有它自己），没有 workspace 内部的
-  # 依赖顺序要守，也没有"等依赖先进索引"的问题 —— 它的依赖全在 crates.io 上现成躺着。
-  # 所以 harbor 算出来的计划就是一行，而它顺手把 tag 与 token 也校验了。
+  # This is a single-crate repository (`[workspace]` holds only this crate), so there
+  # is no in-workspace dependency order to respect and no "wait for the dependency to
+  # reach the index" problem — all its dependencies are already sitting on crates.io.
+  # The plan harbor computes is therefore one line, and it validates the tag and the
+  # token along the way.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
     needs: [ checks ]
     runs-on: ubuntu-latest
-    # 不需要 `if:`：tag push 是唯一的入口，能跑到这个 job 就说明确实要发布，
-    # 而 `needs` 保证了检查已经全过。
+    # No `if:` needed: a tag push is the only entry point, so reaching this job means
+    # a release is really wanted, and `needs` guarantees the checks have all passed.
     #
-    # 也刻意不声明 `environment:`。声明它会把 secret 挪进 environment 作用域，
-    # 并要求那个 environment 在首次运行前就存在 —— 对这道目前还不需要的闸门来说不值。
-    # token 从 Settings → Secrets and variables → Actions 读。
-    # 将来想加人工审批，就建 environment、把 `environment: <name>` 加回来、再把 secret 挪进去。
+    # `environment:` is deliberately not declared either. Declaring it moves secrets
+    # into an environment scope and requires that environment to exist before the
+    # first run — not worth it for a gate that is not needed yet.
+    # The token is read from Settings → Secrets and variables → Actions.
+    # To add manual approval later, create the environment, add
+    # `environment: <name>` back, and move the secret into it.
     permissions:
       contents: read
     steps:
@@ -55,29 +62,34 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      # 这个 job 刻意不用 `rust-cache`：它没有依赖要缓存（包是现成的），
-      # `cargo publish` 几秒钟就验证完；而恢复测试 job 的缓存正是当初让这个 job
-      # 去清理一棵它从没创建过的 `target/package/` 树的原因。
+      # This job deliberately does not use `rust-cache`: it has no dependencies to
+      # cache (the package is ready to go) and `cargo publish` verifies in seconds;
+      # restoring the test job's cache is exactly what once led this job to clean up a
+      # `target/package/` tree it had never created.
 
-      # 发布工具。这个 job 以前用 shell 算出来的东西 —— tag 校验、token 校验、
-      # 发布循环 —— 现在都是 harbor 的一条命令。
+      # The release tool. What this job used to compute in shell — tag validation,
+      # token validation, the publish loop — is now one harbor command.
       - name: Install the release tool
         run: cargo install harbor --locked
 
-      # 两道路闸加一份计划，一条命令搞定：tag 名与 manifest 里的版本一致、
-      # registry token 存在且非空、发布计划算得出来。三条都成立之前，什么都不会上传。
+      # Two gates plus a plan in one command: the tag name matches the version in the
+      # manifest, the registry token exists and is non-empty, and the publish plan can
+      # be computed. Nothing is uploaded until all three hold.
       #
-      # token 只经环境变量传递、绝不作为命令行参数，这样它不会因为 cargo 回显命令行而进日志。
+      # The token travels only through an environment variable, never as a command
+      # line argument, so it cannot reach the logs by cargo echoing the command line.
       - name: Check the release before starting it
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo harbor check --plan "$GITHUB_REF_NAME"
 
-      # harbor publish 会：依赖还没进索引时重试；把"版本已在 registry 上"当成已完成
-      # （所以重跑能补完一次半途失败的发布）；其它任何错误立刻停，而不是把重试预算
-      # 花在一个重试解决不了的失败上。
+      # harbor publish will: retry while a dependency has not reached the index yet;
+      # treat "the version is already in the registry" as done (so a rerun can finish
+      # a half-failed release); and stop immediately on any other error rather than
+      # spending the retry budget on a failure that retrying cannot fix.
       #
-      # 没有 `--order`：这是一个单包 workspace，`check --plan` 刚算出来的计划就是全部答案。
+      # No `--order`: this is a single-package workspace, and the plan `check --plan`
+      # just computed is the whole answer.
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

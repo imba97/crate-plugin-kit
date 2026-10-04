@@ -1,18 +1,20 @@
-//! 泛型 `dlopen` 加载。
+//! Generic `dlopen` loading.
 //!
-//! # 这里没有类型擦除
+//! # No type erasure here
 //!
-//! `T` 是**宿主自己的 `#[repr(C)]` 入口结构体**（对 bmux 来说就是 `BmuxPluginV1`）。
-//! `load()` 返回的是 `*const T` —— **瘦指针**，不是 `dyn Trait`，所以不存在
-//! "两个不同 vtable 的 fat pointer 互转"那种 UB。
+//! `T` is the host's own `#[repr(C)]` entry struct (for bmux, that is
+//! `BmuxPluginV1`). `load()` returns a `*const T` — a thin pointer, not a `dyn Trait`
+//! — so there is no "convert a fat pointer between two different vtables" UB.
 //!
-//! 本 crate **不知道也不需要知道** `T` 里有什么字段；它只负责把符号地址取出来
-//! 并 cast 成 `*const T`。怎么安全地读那些字段是宿主契约 crate 的事。
+//! This crate neither knows nor needs to know which fields `T` has; it only reads
+//! the symbol address and casts it to `*const T`. Reading those fields safely is the
+//! host contract crate's job.
 //!
-//! # 调用方必须保证的事
+//! # What the caller has to guarantee
 //!
-//! 1. `T` 与插件实际导出的结构体**布局一致**（靠宿主的 `abi_version` 字段兜底）；
-//! 2. 每一次读 `T` 的字段之前，要自己包 [`crate::panic::guard`]。
+//! 1. `T` and the struct the plugin actually exports have the same layout (backed by
+//!    the host's `abi_version` field);
+//! 2. every read of a field of `T` is wrapped in [`crate::panic::guard`].
 
 use std::path::{Path, PathBuf};
 
@@ -20,49 +22,54 @@ use libloading::Library;
 
 use crate::error::{KitError, KitResult};
 
-/// 一个已加载的插件。
+/// A loaded plugin.
 ///
-/// 持有 `Library` 句柄 —— **drop 掉这个结构体会把插件卸载**。
-/// 所以只要还想用它导出的东西，就得让它活着。
+/// Holds the `Library` handle — dropping this struct unloads the plugin. So keep it
+/// alive for as long as anything exported by it is still in use.
 pub struct LoadedPlugin<T> {
-    /// 必须持有。字段名以下划线开头是刻意的：它唯一的职责就是活到结构体被 drop。
+    /// Must be held. The field exists to keep the library alive until the struct is
+    /// dropped.
     _lib: Library,
     entry: *const T,
     path: PathBuf,
 }
 
 impl<T> LoadedPlugin<T> {
-    /// 入口结构体的指针。
+    /// Pointer to the entry struct.
     ///
     /// # Safety
     ///
-    /// 调用方保证 `T` 的布局与插件导出的结构体一致。本 crate 无法验证这一点 ——
-    /// 那是宿主 `abi_version` 字段的职责。
+    /// The caller guarantees that the layout of `T` matches the struct exported by
+    /// the plugin. This crate cannot verify that — it is the job of the host's
+    /// `abi_version` field.
     pub fn entry(&self) -> *const T {
         self.entry
     }
 
-    /// 动态库文件路径。
+    /// Dynamic library file path.
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
-// 刻意**不**实现 `Send` / `Sync`：`T` 里装的是裸函数指针，它指向的代码是否线程安全
-// 本 crate 无从得知。需要跨线程传递的宿主应该自己用 `unsafe impl` 明确表态。
+// `Send` / `Sync` are deliberately not implemented: `T` holds raw function pointers,
+// and this crate has no way to know whether the code they point to is thread-safe.
+// A host that needs to pass one across threads should say so explicitly with
+// `unsafe impl`.
 
-/// 打开一个 cdylib 并调用它的入口函数。
+/// Opens a cdylib and calls its entry function.
 ///
 /// # Safety
 ///
-/// - `path` 指向的必须是本 kit 装出来的插件（或布局等价的动态库）；
-/// - `T` 必须与那个插件导出的结构体布局一致。
+/// - `path` must point at a plugin installed by this kit (or a layout-equivalent
+///   dynamic library);
+/// - `T` must have the same layout as the struct that plugin exports.
 ///
 /// # Errors
 ///
-/// - [`KitError::LibraryLoad`]：`dlopen` 失败。
-/// - [`KitError::SymbolMissing`]：没有 `symbol` 这个导出符号。
-/// - [`KitError::NullEntry`]：入口函数返回了空指针。
+/// - [`KitError::LibraryLoad`]: `dlopen` failed.
+/// - [`KitError::SymbolMissing`]: there is no exported symbol named `symbol`.
+/// - [`KitError::NullEntry`]: the entry function returned a null pointer.
 pub unsafe fn open<T>(path: &Path, symbol: &[u8]) -> KitResult<LoadedPlugin<T>> {
     let lib = Library::new(path).map_err(|source| KitError::LibraryLoad {
         path: path.to_path_buf(),
@@ -73,8 +80,10 @@ pub unsafe fn open<T>(path: &Path, symbol: &[u8]) -> KitResult<LoadedPlugin<T>> 
         let f: libloading::Symbol<'_, unsafe extern "C" fn() -> *const T> =
             lib.get(symbol).map_err(|source| {
                 if is_symbol_not_found(&source) {
-                    // 「库里没有这个符号」是常见情况（装错了东西 / 装的是别的插件），
-                    // 单独报比笼统的"加载失败"好读得多。
+                    // "The library does not have this symbol" is a common case (the
+                    // wrong thing was installed, or a different plugin was), and
+                    // reporting it separately reads much better than a vague "load
+                    // failed".
                     KitError::SymbolMissing {
                         symbol: String::from_utf8_lossy(symbol).into_owned(),
                     }
@@ -99,14 +108,15 @@ pub unsafe fn open<T>(path: &Path, symbol: &[u8]) -> KitResult<LoadedPlugin<T>> 
     })
 }
 
-/// `libloading` 表示"库里没有这个符号"的错误，**在各平台的变体名不一样**：
+/// The `libloading` errors that mean "the library does not have this symbol"; the
+/// variant names differ per platform:
 ///
-/// | 平台 | 变体 |
+/// | Platform | Variants |
 /// | ---- | ---- |
 /// | Unix | `DlSym` / `DlSymUnknown` |
 /// | Windows | `GetProcAddress` / `GetProcAddressUnknown` |
 ///
-/// 不区分平台地 match 是编译不过的（变体只在对应平台存在），所以按 `cfg` 拆开。
+/// The variants only exist on their own platform, so the match is split by `cfg`.
 fn is_symbol_not_found(e: &libloading::Error) -> bool {
     #[cfg(unix)]
     {
@@ -131,10 +141,11 @@ fn is_symbol_not_found(e: &libloading::Error) -> bool {
     }
 }
 
-/// 按平台给出 cdylib 文件名的候选列表，**按优先级排列**。
+/// The cdylib file name candidates for this platform, in priority order.
 ///
-/// 会顺带列出别的平台的命名 —— 万一安装目录里躺着一个错平台的产物，
-/// 报错信息里能看见"试过哪些"比只说"找不到"有用。
+/// Other platforms' spellings are listed as well, so that when a wrong-platform
+/// artifact sits in the install dir the error message can show what was tried
+/// instead of only saying "not found".
 pub fn library_candidates(stem: &str) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -144,7 +155,8 @@ pub fn library_candidates(stem: &str) -> Vec<String> {
         _ => out.push(format!("lib{stem}.so")),
     }
 
-    // 兜底：有些构建系统（或手工打包）不带 lib 前缀 / 扩展名不一致。
+    // Fallbacks: some build systems (or hand-made archives) omit the `lib` prefix
+    // or use a different extension.
     for ext in ["so", "dylib", "dll"] {
         for name in [format!("lib{stem}.{ext}"), format!("{stem}.{ext}")] {
             if !out.contains(&name) {
@@ -156,7 +168,8 @@ pub fn library_candidates(stem: &str) -> Vec<String> {
     out
 }
 
-/// 在一个目录里按候选列表找 cdylib，返回第一个存在的。
+/// Finds a cdylib in a directory by walking the candidate list, returning the first
+/// one that exists.
 pub fn find_library(dir: &Path, stem: &str) -> KitResult<PathBuf> {
     let candidates = library_candidates(stem);
 
@@ -177,11 +190,12 @@ pub fn find_library(dir: &Path, stem: &str) -> KitResult<PathBuf> {
 mod tests {
     use super::*;
 
-    /// 当前平台该找的文件名必须排在候选列表第一位 —— 否则会优先命中错平台的产物。
+    /// This platform's file name must come first in the candidate list, otherwise a
+    /// wrong-platform artifact would win.
     #[test]
     fn the_current_platform_name_comes_first() {
         let c = library_candidates("myapp_plugin_foo");
-        let first = c.first().expect("候选列表不该为空");
+        let first = c.first().expect("candidate list must not be empty");
 
         let expected = match std::env::consts::OS {
             "windows" => "myapp_plugin_foo.dll",
@@ -191,8 +205,9 @@ mod tests {
         assert_eq!(first, expected);
     }
 
-    /// 兜底项要覆盖所有平台命名 —— 这样"目录里躺着一个错平台的产物"时，
-    /// 报错信息里的"试过哪些"才有意义。
+    /// The fallback entries must cover every platform spelling — that is what makes
+    /// the "tried" list in the error meaningful when a wrong-platform artifact is
+    /// sitting in the directory.
     #[test]
     fn candidates_cover_every_platform_spelling() {
         let c = library_candidates("stem");
@@ -204,7 +219,10 @@ mod tests {
             "stem.dylib",
             "libstem.dll",
         ] {
-            assert!(c.iter().any(|x| x == name), "候选里缺 {name}：{c:?}");
+            assert!(
+                c.iter().any(|x| x == name),
+                "candidate missing {name}: {c:?}"
+            );
         }
     }
 
@@ -214,7 +232,7 @@ mod tests {
         let mut sorted = c.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), c.len(), "候选里有重复：{c:?}");
+        assert_eq!(sorted.len(), c.len(), "duplicate candidates: {c:?}");
     }
 
     #[test]
@@ -225,7 +243,7 @@ mod tests {
         let want = library_candidates("myapp_plugin_foo")[0].clone();
         std::fs::write(dir.path().join(&want), b"not really a library").unwrap();
 
-        let found = find_library(dir.path(), "myapp_plugin_foo").expect("应当找到");
+        let found = find_library(dir.path(), "myapp_plugin_foo").expect("should be found");
         assert_eq!(found.file_name().unwrap().to_string_lossy(), want);
     }
 
@@ -239,11 +257,11 @@ mod tests {
                 assert_eq!(name, "myapp_plugin_foo");
                 assert!(tried.contains("myapp_plugin_foo"), "tried = {tried}");
             }
-            other => panic!("期望 LibraryNotFound，得到 {other:?}"),
+            other => panic!("expected LibraryNotFound, got {other:?}"),
         }
     }
 
-    /// 目录里的同名**目录**不算命中 —— 只有文件才算。
+    /// A directory with the right name does not count as a hit — only files do.
     #[test]
     fn find_library_ignores_a_directory_with_the_right_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,18 +271,19 @@ mod tests {
         assert!(find_library(dir.path(), "myapp_plugin_foo").is_err());
     }
 
-    /// 打开一个根本不是动态库的文件，要报 `LibraryLoad` 而不是 panic。
+    /// Opening a file that is not a dynamic library at all must report
+    /// `LibraryLoad`, not panic.
     #[test]
     fn opening_a_non_library_reports_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("garbage.bin");
         std::fs::write(&path, b"this is not a shared object").unwrap();
 
-        // SAFETY: 这里就是要它失败，不涉及任何布局假设。
+        // SAFETY: the point here is to make it fail; no layout assumption is involved.
         let got = unsafe { open::<u32>(&path, b"whatever") };
         assert!(
             matches!(got, Err(KitError::LibraryLoad { .. })),
-            "期望 LibraryLoad，得到 {:?}",
+            "expected LibraryLoad, got {:?}",
             got.err()
         );
     }

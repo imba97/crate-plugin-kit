@@ -13,8 +13,8 @@ keywords = ["plugin", "cdylib", "dlopen", "cargo", "extension"]
 categories = ["development-tools", "filesystem"]
 readme = "README.md"
 
-# 不打包进 .crate 的东西。
-# `docs/proposal.md` 是设计文档，值得随源码一起发；只排掉纯粹的本地文件。
+# Things that are not packaged into the .crate.
+# Only purely local files are excluded.
 exclude = ["/.github", "/.scratch"]
 
 [dependencies]

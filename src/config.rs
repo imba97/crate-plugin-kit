@@ -1,8 +1,8 @@
-//! [`KitConfig`]：把一个 kit 实例里所有跟宿主应用相关的名字参数化。
+//! [`KitConfig`]: parametrizes every host-application-specific name used by a kit
+//! instance.
 //!
-//! **本 crate 里没有任何一处硬编码具体宿主应用的名字。**
-//! 所有 `bmux` / `bmux-plugin.toml` / `bmux_plugin_entry_v1` 之类的东西，
-//! 都由这里提供。
+//! No host application name is hardcoded anywhere in this crate. Everything like
+//! `bmux` / `bmux-plugin.toml` / `bmux_plugin_entry_v1` is supplied here.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -10,79 +10,88 @@ use std::time::Duration;
 
 use crate::error::{KitError, KitResult};
 
-/// 默认的锁等待时间。
+/// Default lock wait time.
 pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 一个 kit 实例的全部可配置项。
+/// Every configurable item of a kit instance.
 #[derive(Debug, Clone)]
 pub struct KitConfig {
-    /// 应用 id。决定数据目录 `~/.{id}`，也用作默认的 HTTP User-Agent 一部分。
+    /// Application id. Determines the data dir `~/.{id}`, and is part of the default
+    /// HTTP User-Agent.
     pub id: String,
 
-    /// 插件 manifest 的文件名，如 `"bmux-plugin.toml"`。
+    /// File name of the plugin manifest, such as `"bmux-plugin.toml"`.
     ///
-    /// manifest 的 `[plugin]` / `[lib]` 两段由本 crate 定义（见 [`crate::manifest`]）。
-    /// 宿主可以往同一个文件里追加自己的段（例如 bmux 的 `[detect]`），本 crate 会原样忽略。
+    /// The `[plugin]` and `[lib]` sections of the manifest are defined by this crate
+    /// (see [`crate::manifest`]). A host may append its own sections to the same file
+    /// (for example bmux's `[detect]`); this crate ignores them.
     pub manifest_name: String,
 
-    /// 插件 crate 名前缀，如 `"bmux-plugin-"`。
+    /// Plugin crate name prefix, such as `"bmux-plugin-"`.
     ///
-    /// `install("cargo")` 会先补成 `"bmux-plugin-cargo"`；已经带前缀的原样使用。
+    /// `install("cargo")` first expands to `"bmux-plugin-cargo"`; a name that already
+    /// carries the prefix is used as-is.
     pub crate_prefix: String,
 
-    /// cdylib 导出的入口符号，如 `b"bmux_plugin_entry_v1"`。
+    /// Entry symbol exported by the cdylib, such as `b"bmux_plugin_entry_v1"`.
     pub entry_symbol: Vec<u8>,
 
-    /// cdylib 文件名主干前缀，如 `"bmux_plugin_"`。
+    /// Prefix of the cdylib file name stem, such as `"bmux_plugin_"`.
     ///
-    /// 与「crate 名去掉前缀」拼接后，再加平台扩展名，得到实际文件名。
-    /// 例：`bmux-plugin-cargo` → `bmux_plugin_` + `cargo` → `libbmux_plugin_cargo.so`。
+    /// Concatenated with the crate name minus its prefix, then given the platform
+    /// extension, this yields the actual file name.
+    /// Example: `bmux-plugin-cargo` → `bmux_plugin_` + `cargo` → `libbmux_plugin_cargo.so`.
     pub lib_stem_prefix: String,
 
-    /// 宿主的**契约 crate** 名，如 `"bmux-plugin"`。生成的 wrapper 工程要依赖它。
+    /// Name of the host's contract crate, such as `"bmux-plugin"`. The generated
+    /// wrapper project depends on it.
     pub contract_crate: String,
 
-    /// 契约 crate 的版本要求，如 `"0.1"`。
+    /// Version requirement for the contract crate, such as `"0.1"`.
     pub contract_version: String,
 
-    /// 生成的 wrapper 工程使用的 edition。
+    /// Edition used by the generated wrapper project.
     pub wrapper_edition: String,
 
-    /// wrapper 工程 `src/lib.rs` 的内容模板。
+    /// Template for the wrapper project's `src/lib.rs`.
     ///
-    /// `{crate_ident}` 会被替换成插件 crate 的 ident（`-` 换成 `_`）。
-    /// 例（bmux）：`"bmux_plugin::export!({crate_ident}::create);\n"`
+    /// `{crate_ident}` is replaced with the plugin crate's ident (`-` becomes `_`).
+    /// Example (bmux): `"bmux_plugin::export!({crate_ident}::create);\n"`
     pub wrapper_body: String,
 
-    /// 数据目录覆盖。`None` = 用 `~/.{id}`。
+    /// Data dir override. `None` = use `~/.{id}`.
     pub data_dir: Option<PathBuf>,
 
-    /// 等待安装锁的超时时间。
+    /// Timeout for waiting on the install lock.
     pub lock_timeout: Duration,
 
-    /// 安装时是否优先尝试 prebuilt 产物。
+    /// Whether to try prebuilt artifacts first when installing.
     pub prefer_prebuilt: bool,
 
-    /// 覆盖 target triple。`None` = 用编译期注入的 `TARGET`（见 `build.rs`）。
+    /// Override for the target triple. `None` = use the triple injected at compile
+    /// time (see `build.rs`).
     pub target_triple: Option<String>,
 
-    /// crates.io 索引地址。可以指向镜像。
+    /// crates.io index address. May point at a mirror.
     pub registry: String,
 
-    /// 本地路径覆盖：crate 名 → 本地目录。
+    /// Local path overrides: crate name → local directory.
     ///
-    /// 生成 wrapper 工程时会写成它的 `[patch.crates-io]`。**开发期用** ——
-    /// wrapper 住在 `~/.{id}/build/` 下，读不到宿主项目里的 `.cargo/config.toml`，
-    /// 所以本地联调必须在这里显式指路。生产环境留空。
+    /// Written into the generated wrapper project as its `[patch.crates-io]`. For
+    /// development use: the wrapper lives under `~/.{id}/build/` and cannot see the
+    /// host project's `.cargo/config.toml`, so local overrides must be passed
+    /// explicitly here. Leave empty in production.
     pub local_overrides: BTreeMap<String, PathBuf>,
 }
 
 impl KitConfig {
-    /// 用最少的信息起一个配置，其余字段给保守默认值。
+    /// Starts a config from the minimum amount of information, with conservative
+    /// defaults for the rest.
     ///
-    /// 默认值全部由 `id` 推导，并且**互相自洽** —— 例如 `id = "myapp"` 会得到：
+    /// All defaults are derived from `id` and are mutually consistent — for example
+    /// `id = "myapp"` yields:
     ///
-    /// | 字段 | 值 |
+    /// | Field | Value |
     /// | ---- | -- |
     /// | `manifest_name` | `myapp-plugin.toml` |
     /// | `crate_prefix` | `myapp-plugin-` |
@@ -90,10 +99,10 @@ impl KitConfig {
     /// | `entry_symbol` | `myapp_plugin_entry_v1` |
     /// | `contract_crate` | `myapp-plugin` |
     ///
-    /// 仍然要自己填的是 `wrapper_body`（它引用的路径来自宿主的契约 crate）和
-    /// `contract_version`。
+    /// `wrapper_body` (its paths come from the host's contract crate) and
+    /// `contract_version` still have to be filled in by hand.
     ///
-    /// `entry_symbol` 不需要以 NUL 结尾 —— `libloading` 会自己补。
+    /// `entry_symbol` does not need a trailing NUL — `libloading` adds it.
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
         let snake = id.replace('-', "_");
@@ -116,28 +125,29 @@ impl KitConfig {
         }
     }
 
-    /// 覆盖数据目录。
+    /// Overrides the data dir.
     pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
         self
     }
 
-    /// 覆盖锁等待时间。
+    /// Overrides the lock wait time.
     pub fn with_lock_timeout(mut self, t: Duration) -> Self {
         self.lock_timeout = t;
         self
     }
 
-    /// 本次构建的 target triple。优先用配置里的覆盖值。
+    /// Target triple of this build. The configured override wins.
     pub fn effective_target(&self) -> &str {
         self.target_triple
             .as_deref()
             .unwrap_or(crate::TARGET_TRIPLE)
     }
 
-    /// 把 `install()` 收到的名字规范成完整 crate 名。
+    /// Normalizes the name passed to `install()` into a full crate name.
     ///
-    /// 已带前缀的原样返回；否则补前缀。
+    /// A name that already carries the prefix is returned as-is; otherwise the
+    /// prefix is prepended.
     pub fn normalize_crate_name(&self, name: &str) -> String {
         if name.starts_with(&self.crate_prefix) {
             name.to_string()
@@ -146,7 +156,8 @@ impl KitConfig {
         }
     }
 
-    /// 由 crate 名推出 cdylib 文件名主干（不含 `lib` 前缀与扩展名）。
+    /// Derives the cdylib file name stem (without the `lib` prefix and extension)
+    /// from a crate name.
     ///
     /// `bmux-plugin-cargo` → `bmux_plugin_cargo`
     pub fn lib_stem(&self, crate_name: &str) -> String {
@@ -156,7 +167,7 @@ impl KitConfig {
         format!("{}{}", self.lib_stem_prefix, tail.replace('-', "_"))
     }
 
-    /// 解析出各项路径。会按需创建目录。
+    /// Resolves the various paths. Creates directories as needed.
     pub fn paths(&self) -> KitResult<KitPaths> {
         let root = match &self.data_dir {
             Some(d) => d.clone(),
@@ -172,7 +183,7 @@ impl KitConfig {
     }
 }
 
-/// 由 `directories` 决定的默认数据目录 `~/.{id}`。
+/// Default data dir `~/.{id}`, as determined by `directories`.
 fn default_data_dir(id: &str) -> KitResult<PathBuf> {
     let home = directories::UserDirs::new()
         .map(|d| d.home_dir().to_path_buf())
@@ -180,33 +191,33 @@ fn default_data_dir(id: &str) -> KitResult<PathBuf> {
     Ok(home.join(format!(".{id}")))
 }
 
-/// kit 用到的所有路径。
+/// All paths the kit uses.
 #[derive(Debug, Clone)]
 pub struct KitPaths {
-    /// `<data-dir>` 本身。
+    /// `<data-dir>` itself.
     pub root: PathBuf,
-    /// 已安装插件的目录，`<root>/plugins`。
+    /// Install dir of installed plugins, `<root>/plugins`.
     pub plugins: PathBuf,
-    /// build-host 脚手架目录，`<root>/build`。
+    /// build-host scaffolding directory, `<root>/build`.
     pub build: PathBuf,
-    /// 安装排他锁文件，`<root>/.lock`。
+    /// Install exclusive lock file, `<root>/.lock`.
     pub lock_file: PathBuf,
-    /// 安装记录缓存，`<root>/plugins/.plugins.json`。
+    /// Install record cache, `<root>/plugins/.plugins.json`.
     pub index_file: PathBuf,
 }
 
 impl KitPaths {
-    /// 某个插件的安装目录，`<plugins>/<crate_name>`。
+    /// Install dir of one plugin, `<plugins>/<crate_name>`.
     pub fn plugin_dir(&self, crate_name: &str) -> PathBuf {
         self.plugins.join(crate_name)
     }
 
-    /// 某个插件的 manifest 路径。
+    /// Manifest path of one plugin.
     pub fn manifest_path(&self, crate_name: &str, manifest_name: &str) -> PathBuf {
         self.plugin_dir(crate_name).join(manifest_name)
     }
 
-    /// 某个插件的 build-host 脚手架目录。
+    /// build-host scaffolding directory of one plugin.
     pub fn build_dir(&self, crate_name: &str) -> PathBuf {
         self.build.join(crate_name)
     }
@@ -234,7 +245,8 @@ mod tests {
     fn normalizes_short_and_full_crate_names() {
         let c = cfg();
         assert_eq!(c.normalize_crate_name("foo"), "myapp-plugin-foo");
-        // 已经带前缀的原样返回 —— 否则会变成 myapp-plugin-myapp-plugin-foo
+        // A name that already carries the prefix is returned as-is, otherwise it
+        // would become myapp-plugin-myapp-plugin-foo
         assert_eq!(
             c.normalize_crate_name("myapp-plugin-foo"),
             "myapp-plugin-foo"
@@ -245,7 +257,7 @@ mod tests {
     fn derives_lib_stem_from_crate_name() {
         let c = cfg();
         assert_eq!(c.lib_stem("myapp-plugin-foo"), "myapp_plugin_foo");
-        // 短横线要换成下划线
+        // Hyphens become underscores
         assert_eq!(c.lib_stem("myapp-plugin-a-b"), "myapp_plugin_a_b");
     }
 
@@ -263,7 +275,7 @@ mod tests {
     fn paths_honour_the_data_dir_override() {
         let root = PathBuf::from("some").join("dir");
         let c = cfg().with_data_dir(&root);
-        let p = c.paths().expect("override 时不该碰 HOME");
+        let p = c.paths().expect("must not touch HOME when overridden");
 
         assert_eq!(p.root, root);
         assert_eq!(p.plugins, root.join("plugins"));

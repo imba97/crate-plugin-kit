@@ -1,16 +1,19 @@
-//! 安装 / 卸载期间的排他文件锁。
+//! Exclusive file lock held during install / uninstall.
 //!
-//! 两个终端同时 `plugin add` 会写坏 `.plugins.json`、或让两个 `cargo build`
-//! 往同一个 wrapper 目录里写。用一把**跨进程**的锁挡住。
+//! Two terminals running `plugin add` at once would corrupt `.plugins.json`, or let
+//! two `cargo build` runs write into the same wrapper directory. A cross-process
+//! lock keeps them out of each other's way.
 //!
-//! # 实现
+//! # Implementation
 //!
-//! 用 `create_new(true)` 创建锁文件 —— 这个操作在主流文件系统上是原子的，
-//! 谁创建成功谁持锁。内容写入 pid 与时间戳，方便排查。
+//! The lock file is created with `create_new(true)` — atomic on mainstream file
+//! systems, so whoever creates it first holds the lock. The pid and a timestamp are
+//! written into it to make diagnosis easier.
 //!
-//! **不做 OS 级文件锁**（`flock` / `LockFileEx`）：那需要额外的平台代码，
-//! 而本 crate 已经有一个更简单的判据 —— 锁文件是否存在 + 是否过期。
-//! 代价是"进程被 kill -9 会留下陈旧的锁文件"，所以加了过期接管。
+//! No OS-level file lock (`flock` / `LockFileEx`): that would need extra
+//! per-platform code, and this crate already has a simpler criterion — does the lock
+//! file exist, and is it stale? The price is that a `kill -9` leaves a stale lock
+//! file behind, hence the stale takeover.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,36 +21,38 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::{KitError, KitResult};
 
-/// 锁文件多久算过期。超过这个年龄的锁会被后来者接管。
+/// How old a lock file has to be before it counts as stale. A lock older than this
+/// is taken over by a later arrival.
 ///
-/// 取值要比任何合理的安装耗时长（`cargo build` 可能好几分钟），
-/// 又要比"用户已经忘了这件事"的时长短。
+/// The value has to be longer than any reasonable install takes (`cargo build` can
+/// take minutes), and shorter than it takes the user to forget about it.
 pub const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 
-/// 轮询间隔。
+/// Poll interval.
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 
-/// 持有一把排他锁。`Drop` 时释放。
+/// Holds an exclusive lock. Released on `Drop`.
 #[derive(Debug)]
 pub struct FileLock {
     path: PathBuf,
 }
 
 impl FileLock {
-    /// 取锁，最多等 `timeout`。
+    /// Acquires the lock, waiting at most `timeout`.
     ///
     /// # Errors
     ///
-    /// - [`KitError::LockTimeout`]：超时仍是别人持有。
-    /// - [`KitError::LockIo`]：IO 出错，或锁文件所在目录建不出来。
+    /// - [`KitError::LockTimeout`]: another holder still has it when the timeout expires.
+    /// - [`KitError::LockIo`]: an IO error, or the lock file's parent directory could
+    ///   not be created.
     pub fn acquire(path: &Path, timeout: Duration) -> KitResult<Self> {
         Self::acquire_with_stale_after(path, timeout, STALE_AFTER)
     }
 
-    /// 同 [`Self::acquire`]，但可以指定"多久算过期"。
+    /// Like [`Self::acquire`], but with a caller-supplied staleness threshold.
     ///
-    /// 单独开这个口子是为了可测：把阈值设成 0，就能在不碰文件时间戳（那需要平台 API）
-    /// 的前提下验证接管逻辑。
+    /// The hook exists for testability: setting the threshold to 0 exercises the
+    /// takeover path without touching file timestamps (which needs platform APIs).
     pub(crate) fn acquire_with_stale_after(
         path: &Path,
         timeout: Duration,
@@ -66,7 +71,7 @@ impl FileLock {
             match Self::try_create(path) {
                 Ok(lock) => return Ok(lock),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // 别人持着。先看看是不是过期了。
+                    // Someone else holds it. First check whether it is stale.
                     if Self::take_over_if_stale(path, stale_after)? {
                         continue;
                     }
@@ -94,7 +99,7 @@ impl FileLock {
             .create_new(true)
             .open(path)?;
 
-        // 写点诊断信息。失败无所谓 —— 锁本身已经拿到了。
+        // Some diagnostic content. Failure does not matter — the lock is already held.
         let _ = writeln!(f, "pid={} at={:?}", std::process::id(), SystemTime::now());
 
         Ok(Self {
@@ -102,17 +107,18 @@ impl FileLock {
         })
     }
 
-    /// 锁文件太老就把它删掉，返回 `true` 表示"删掉了，可以重试"。
+    /// Deletes the lock file if it is too old, returning `true` to mean "it is gone,
+    /// retry now".
     fn take_over_if_stale(path: &Path, stale_after: Duration) -> KitResult<bool> {
         let Ok(meta) = std::fs::metadata(path) else {
-            // 已经没了（别人刚释放），直接让调用方重试。
+            // Already gone (someone just released it): let the caller retry.
             return Ok(true);
         };
         let Ok(modified) = meta.modified() else {
             return Ok(false);
         };
         let Ok(age) = SystemTime::now().duration_since(modified) else {
-            // 时间戳在未来 —— 时钟有问题，保守起见不接管。
+            // The timestamp is in the future — the clock is broken, so do not take over.
             return Ok(false);
         };
 
@@ -122,7 +128,8 @@ impl FileLock {
 
         match std::fs::remove_file(path) {
             Ok(()) => Ok(true),
-            // 别人刚好也删了 —— 那更好，让调用方重试。
+            // Someone else removed it at the same moment — even better; let the
+            // caller retry.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(source) => Err(KitError::LockIo {
                 path: path.to_path_buf(),
@@ -149,11 +156,11 @@ mod tests {
     #[test]
     fn acquires_and_creates_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        // 父目录还不存在 —— acquire 应当自己建出来
+        // The parent does not exist yet — acquire must create it
         let path = dir.path().join("nested").join("deeper").join(".lock");
 
-        let lock = FileLock::acquire(&path, Duration::from_millis(50)).expect("应当能取到锁");
-        assert!(path.is_file(), "锁文件应当已创建");
+        let lock = FileLock::acquire(&path, Duration::from_millis(50)).expect("should acquire");
+        assert!(path.is_file(), "the lock file should have been created");
         drop(lock);
     }
 
@@ -167,10 +174,11 @@ mod tests {
             assert!(path.is_file());
         }
 
-        assert!(!path.exists(), "drop 之后锁文件应当被删掉");
+        assert!(!path.exists(), "the lock file should be deleted on drop");
     }
 
-    /// 第二个持有者要等，等到超时就报 `LockTimeout` —— 而不是静默放行。
+    /// The second holder has to wait, and reports `LockTimeout` when it runs out of
+    /// time — it must not silently proceed.
     #[test]
     fn a_second_holder_times_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -181,11 +189,11 @@ mod tests {
         let err = FileLock::acquire(&path, Duration::from_millis(120));
         assert!(
             matches!(err, Err(KitError::LockTimeout { .. })),
-            "期望 LockTimeout，得到 {err:?}"
+            "expected LockTimeout, got {err:?}"
         );
     }
 
-    /// 拿到锁之后再释放，后来者应当能立刻接上。
+    /// Once the lock is released, a later arrival should get it immediately.
     #[test]
     fn a_later_holder_succeeds_after_release() {
         let dir = tempfile::tempdir().unwrap();
@@ -194,13 +202,15 @@ mod tests {
         let first = FileLock::acquire(&path, Duration::from_millis(50)).unwrap();
         drop(first);
 
-        let _second = FileLock::acquire(&path, Duration::from_millis(200)).expect("应当能接上");
+        let _second = FileLock::acquire(&path, Duration::from_millis(200)).expect("should acquire");
     }
 
-    /// 陈旧的锁（`kill -9` 的遗留物）要被接管，否则用户会被永久挡住。
+    /// A stale lock (left behind by `kill -9`) has to be taken over, otherwise the
+    /// user stays blocked forever.
     ///
-    /// 把 stale 阈值设成 0，任何已存在的锁都算过期 —— 这样不用去改文件时间戳
-    /// （那要平台 API），测试是可移植的。
+    /// With the staleness threshold set to 0, any existing lock counts as stale —
+    /// which keeps the test portable, since changing file timestamps needs platform
+    /// APIs.
     #[test]
     fn takes_over_a_stale_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -210,10 +220,10 @@ mod tests {
 
         let _lock =
             FileLock::acquire_with_stale_after(&path, Duration::from_millis(500), Duration::ZERO)
-                .expect("陈旧的锁应当被接管");
+                .expect("a stale lock should be taken over");
     }
 
-    /// 新鲜的锁不能被抢。
+    /// A fresh lock must not be stolen.
     #[test]
     fn does_not_steal_a_fresh_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -221,16 +231,16 @@ mod tests {
 
         std::fs::write(&path, "pid=1 at=<fresh>").unwrap();
 
-        // 阈值给足，刚写下的锁远没到过期
+        // Threshold left at the default: a lock just written is nowhere near stale
         let err =
             FileLock::acquire_with_stale_after(&path, Duration::from_millis(120), STALE_AFTER);
         assert!(
             matches!(err, Err(KitError::LockTimeout { .. })),
-            "新鲜的锁不该被抢走"
+            "a fresh lock must not be stolen"
         );
     }
 
-    /// 锁文件写着 pid，方便排查是谁占着。
+    /// The lock file carries the pid, which makes it easy to see who holds it.
     #[test]
     fn writes_diagnostic_content() {
         let dir = tempfile::tempdir().unwrap();
@@ -239,7 +249,7 @@ mod tests {
         let _lock = FileLock::acquire(&path, Duration::from_millis(50)).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("pid="), "锁文件内容：{text:?}");
+        assert!(text.contains("pid="), "lock file content: {text:?}");
         assert!(text.contains(&std::process::id().to_string()));
     }
 }

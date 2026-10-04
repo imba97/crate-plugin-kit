@@ -1,36 +1,33 @@
-//! 插件 manifest 的读写。
+//! Reading and writing the plugin manifest.
 //!
 //! # schema
 //!
-//! `[plugin]` 与 `[lib]` 两段由**本 crate** 定义；宿主可以往同一个文件里追加
-//! 自己的段（例如 bmux 的 `[detect]`），本 crate 原样保留、不做解释。
+//! The `[plugin]` and `[lib]` sections are defined by this crate; a host may append
+//! its own sections to the same file (for example bmux's `[detect]`), which this crate
+//! preserves verbatim and does not interpret.
 //!
 //! ```toml
 //! [plugin]
 //! name       = "cargo"
 //! version    = "0.1.0"
-//! abi        = 1                              # 可选，宿主自用
-//! family     = "rust"                         # 可选，宿主自用
-//! repository = "https://github.com/o/r"       # 可选，prebuilt 下载用
+//! abi        = 1                              # optional, for the host's own use
+//! family     = "rust"                         # optional, for the host's own use
+//! repository = "https://github.com/o/r"       # optional, used for prebuilt downloads
 //!
 //! [lib]
-//! stem = "bmux_plugin_cargo"                  # 可选；缺省由 KitConfig 推导
+//! stem = "bmux_plugin_cargo"                  # optional; derived from KitConfig by default
 //!
-//! [detect]                                    # ← 宿主自己的段，本 crate 不碰
+//! [detect]                                    # <- the host's own section, untouched by this crate
 //! strong = ["Cargo.lock"]
 //! weak   = ["Cargo.toml"]
 //! ```
 //!
-//! # manifest 是怎么进到安装目录的
+//! # How the manifest reaches the install dir
 //!
-//! **插件 crate 的源码根目录里就放一份 `<manifest_name>`**，build-host 安装时
-//! 本 crate 用 `cargo metadata` 定位 crate 源码目录，把这个文件原样拷进安装目录。
-//!
-//! 这样：
-//!
-//! - **单一事实来源** —— detect 信息跟着插件代码走，不会两边不同步；
-//! - **安装后是纯文件** —— 检测阶段只读文件，不需要 `dlopen`；
-//! - **不改 ABI** —— 不需要多导出一个"把 manifest 交出来"的符号。
+//! The plugin crate's source root holds a copy of `<manifest_name>`. During a
+//! build-host install this crate uses `cargo metadata` to locate the crate source dir
+//! and copies that file verbatim into the install dir, so there is a single source of
+//! truth and no extra exported symbol is needed.
 
 use std::path::Path;
 
@@ -38,65 +35,70 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{KitError, KitResult};
 
-/// 解析后的 manifest。
+/// A parsed manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
-    /// `[plugin]` 段。
+    /// The `[plugin]` section.
     pub plugin: PluginSection,
 
-    /// `[lib]` 段。缺省时由 [`crate::KitConfig::lib_stem`] 推导。
+    /// The `[lib]` section. Derived from [`crate::KitConfig::lib_stem`] when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lib: Option<LibSection>,
 
-    /// 宿主自己的其它段（`[detect]` 之类），原样保留。
+    /// Any other sections belonging to the host (`[detect]` and the like), preserved
+    /// verbatim.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
 
-/// manifest 的 `[plugin]` 段。
+/// The `[plugin]` section of a manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginSection {
-    /// 插件名。**这是权威来源** —— 加载后宿主应校验插件自报名是否与它一致。
+    /// Plugin name. This is the authoritative source — after loading, a host should
+    /// check that the plugin's self-declared name matches it.
     pub name: String,
 
-    /// 插件版本。
+    /// Plugin version.
     pub version: String,
 
-    /// 跨边界 ABI 版本。宿主自用，本 crate 只做搬运。
+    /// Cross-boundary ABI version. For the host's own use; this crate only moves it
+    /// around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi: Option<u32>,
 
-    /// 生态分组。宿主自用，本 crate 只做搬运。
+    /// Ecosystem family. For the host's own use; this crate only moves it around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
 
-    /// 插件仓库地址。prebuilt 下载时需要它来拼 Release URL。
+    /// Plugin repository URL. Needed when downloading a prebuilt, to build the release
+    /// URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
 
-    /// 人类可读描述。
+    /// Human-readable description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// 其它键，原样保留。
+    /// Any other keys, preserved verbatim.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
 
-/// manifest 的 `[lib]` 段。
+/// The `[lib]` section of a manifest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibSection {
-    /// cdylib 文件名主干（平台无关，不含 `lib` 前缀与扩展名）。
+    /// cdylib file name stem (platform-independent, without the `lib` prefix and the
+    /// extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stem: Option<String>,
 
-    /// 其它键，原样保留。
+    /// Any other keys, preserved verbatim.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
 
 impl PluginManifest {
-    /// 从文件读。
+    /// Reads from a file.
     pub fn read(path: &Path) -> KitResult<Self> {
         let text = std::fs::read_to_string(path).map_err(|source| KitError::ManifestRead {
             path: path.to_path_buf(),
@@ -105,14 +107,15 @@ impl PluginManifest {
         Self::parse(&text, path)
     }
 
-    /// 从字符串解析。
+    /// Parses from a string.
     pub fn parse(text: &str, path: &Path) -> KitResult<Self> {
         let parsed: Self = toml::from_str(text).map_err(|source| KitError::ManifestParse {
             path: path.to_path_buf(),
             source: Box::new(source),
         })?;
 
-        // 空名字是常见的"文件写坏了"症状，单独报出来比让它一路带下去好。
+        // An empty name is a common symptom of a broken file; reporting it here beats
+        // letting it travel on.
         if parsed.plugin.name.trim().is_empty() {
             return Err(KitError::ManifestMissingField {
                 field: "plugin.name".to_string(),
@@ -128,13 +131,13 @@ impl PluginManifest {
         Ok(parsed)
     }
 
-    /// 序列化回 TOML 文本。
+    /// Serializes back to TOML text.
     pub fn to_toml(&self) -> KitResult<String> {
         toml::to_string_pretty(self)
-            .map_err(|e| KitError::Registry(format!("序列化 manifest 失败：{e}")))
+            .map_err(|e| KitError::Registry(format!("failed to serialize manifest: {e}")))
     }
 
-    /// 写到文件。
+    /// Writes to a file.
     pub fn write(&self, path: &Path) -> KitResult<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -144,9 +147,10 @@ impl PluginManifest {
         Ok(())
     }
 
-    /// 生效的 cdylib 文件名主干。
+    /// The effective cdylib file name stem.
     ///
-    /// 优先用 manifest 里的显式声明；没有就用 `cfg.lib_stem(crate_name)` 推导。
+    /// An explicit declaration in the manifest wins; otherwise it is derived with
+    /// `cfg.lib_stem(crate_name)`.
     pub fn effective_lib_stem(&self, cfg: &crate::KitConfig, crate_name: &str) -> String {
         self.lib
             .as_ref()
@@ -177,7 +181,7 @@ weak   = ["Cargo.toml"]
 "#;
 
     fn parse(text: &str) -> PluginManifest {
-        PluginManifest::parse(text, Path::new("test.toml")).expect("应当解析成功")
+        PluginManifest::parse(text, Path::new("test.toml")).expect("should parse")
     }
 
     #[test]
@@ -193,8 +197,9 @@ weak   = ["Cargo.toml"]
         );
     }
 
-    /// 关键行为：宿主自己的段（这里是 `[detect]`）必须被**原样保留**。
-    /// 这个 crate 不认识它，重写 manifest 时绝不能把它丢掉。
+    /// Key behavior: a host-defined section (here `[detect]`) must be preserved
+    /// verbatim. This crate does not understand it, and rewriting the manifest must
+    /// never drop it.
     #[test]
     fn preserves_host_defined_sections() {
         let m = parse(SAMPLE);
@@ -204,8 +209,9 @@ weak   = ["Cargo.toml"]
     #[test]
     fn round_trips_through_toml() {
         let m = parse(SAMPLE);
-        let text = m.to_toml().expect("应当能序列化");
-        let again = PluginManifest::parse(&text, Path::new("again.toml")).expect("应当能读回");
+        let text = m.to_toml().expect("should serialize");
+        let again =
+            PluginManifest::parse(&text, Path::new("again.toml")).expect("should read back");
 
         assert_eq!(again.plugin.name, "cargo");
         assert_eq!(again.plugin.abi, Some(1));
@@ -296,9 +302,9 @@ version = "1.0.0"
         let path = dir.path().join("nested").join("myapp-plugin.toml");
 
         let m = parse(SAMPLE);
-        m.write(&path).expect("应当能落盘");
+        m.write(&path).expect("should write to disk");
 
-        let back = PluginManifest::read(&path).expect("应当能读回");
+        let back = PluginManifest::read(&path).expect("should read back");
         assert_eq!(back.plugin.name, "cargo");
         assert!(back.extra.contains_key("detect"));
     }

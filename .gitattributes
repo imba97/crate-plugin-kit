@@ -1,10 +1,10 @@
-# 统一 LF。
+# Uniform LF.
 #
-# 这个 crate 会被发到 crates.io，源文件里混进 CRLF 没有好处，
-# 而且会让 diff 在 Windows / Unix 之间来回抖。
+# This crate is published to crates.io; there is nothing to gain from CRLF sneaking
+# into source files, and it makes diffs flip back and forth between Windows and Unix.
 * text=auto eol=lf
 
-# 二进制文件不做换行转换
+# No newline conversion for binary files
 *.png  binary
 *.ico  binary
 *.dll  binary
