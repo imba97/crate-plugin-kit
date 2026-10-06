@@ -35,7 +35,7 @@
 //! wrapper exists.
 //!
 //! The two generated files are rewritten on every install; the target directory beside
-//! them is not. That asymmetry is deliberate and load-bearing — [`reset_wrapper`] says why.
+//! them is not. That asymmetry is deliberate and load-bearing — `reset_wrapper` says why.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
