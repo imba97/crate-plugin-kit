@@ -141,3 +141,42 @@ fn uninstall_removes_it() {
     assert!(!installed.dir.exists(), "the directory should be gone");
     assert!(kit.list().expect("the store should list").is_empty());
 }
+
+/// An update rebuilds the plugin without rebuilding everything it depends on.
+///
+/// The wrapper project is regenerated for every install, and cargo's cache for it lives in a
+/// `target` directory *inside* the wrapper. Clearing the wrapper wholesale — which is what it
+/// looks like it should do — takes that cache with it, and cargo then recompiles the plugin,
+/// the contract crate and every dependency of both, on every single `update`. The test cannot
+/// watch cargo's output, but it can leave a file where only cargo's cache goes: if it is still
+/// there afterwards, the cache the next build reads from was still there too.
+#[test]
+fn update_keeps_the_build_cache_inside_the_wrapper() {
+    let (tmp, checkout) = fixture();
+    let (kit, root) = kit(tmp.path());
+
+    kit.install_from_path(&checkout).expect("should install");
+
+    let cache = root.join("build").join("toyapp-plugin-toy").join("target");
+    assert!(
+        cache.is_dir(),
+        "the first install built through a wrapper, so cargo left a target directory: {}",
+        cache.display()
+    );
+    std::fs::write(cache.join("sentinel"), "cargo's cache lives here").expect("should write");
+
+    // Touched so the update has something to build: without it this could pass by cargo
+    // deciding there was nothing to do at all.
+    let source = checkout.join("src").join("lib.rs");
+    let mut text = std::fs::read_to_string(&source).expect("should read the fixture source");
+    text.push_str("\n// touched, to give the rebuild something to do\n");
+    std::fs::write(&source, text).expect("should write the fixture source");
+
+    let updated = kit.update("toy", None).expect("should rebuild");
+    assert!(updated.library.is_file(), "{:?}", updated.library);
+
+    assert!(
+        cache.join("sentinel").is_file(),
+        "the build cache must survive an update, or every update recompiles the whole graph"
+    );
+}

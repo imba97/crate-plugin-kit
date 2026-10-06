@@ -193,8 +193,15 @@ so explicitly, and this crate writes it into the wrapper's own `[patch.crates-io
 │   └── .plugins.json             ← install record cache
 ├── build/                        ← generated wrappers
 │   └── myapp-plugin-foo/
+│       └── target/               ← cargo's build cache, kept between installs
 └── .lock                         ← cross-process install lock
 ```
+
+The wrapper's generated files are rewritten on every install, but `build/<crate>/target/` is
+not: it is cargo's cache, and it is what lets `update` recompile the plugin and not the plugin's
+entire dependency graph along with it. `plugin rm` removes the installed plugin, not this
+directory — clear `<data-dir>/build/` by hand if the disk space matters more than the next
+build being fast.
 
 `.plugins.json` is a **cache, not a source of truth**. Lose it or corrupt it and `list()`
 rebuilds from the manifests on disk.

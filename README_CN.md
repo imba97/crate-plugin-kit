@@ -167,8 +167,13 @@ let entry: *const MyHostEntry = plugin.entry();
 │   └── .plugins.json             ← 安装记录缓存
 ├── build/                        ← 生成的 wrapper
 │   └── myapp-plugin-foo/
+│       └── target/               ← cargo 的构建缓存，跨安装保留
 └── .lock                         ← 跨进程安装锁
 ```
+
+wrapper 的两个生成文件每次安装都会重写，但 `build/<crate>/target/` 不会 —— 那是 cargo 的缓存，
+正是它让 `update` 只重编插件，而不是把插件整条依赖链一起重编。`plugin rm` 删掉的是已安装的插件，
+不是这个目录；如果磁盘空间比「下次构建快一点」更重要，手动清空 `<data-dir>/build/` 即可。
 
 `.plugins.json` **是缓存，不是事实来源**。丢了或坏了，`list()` 会从磁盘上的 manifest 重建。
 

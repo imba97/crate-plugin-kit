@@ -14,7 +14,8 @@
 //! ```text
 //! <build>/<crate>/
 //! ├── Cargo.toml        # [lib] crate-type = ["cdylib"], depends on the plugin and the host contract crate
-//! └── src/lib.rs        # one line: <contract>::export!(<plugin_crate>::create);
+//! ├── src/lib.rs        # one line: <contract>::export!(<plugin_crate>::create);
+//! └── target/           # cargo's build cache, kept between installs -- see `reset_wrapper`
 //! ```
 //!
 //! The benefit is that the plugin's own crate stays a plain rlib: crates.io consumes
@@ -32,6 +33,9 @@
 //! [`install`] is the whole flow. `metadata` holds the `cargo metadata` parsing, and
 //! `probe_contract_requirement` below is the one step that has to run *before* the
 //! wrapper exists.
+//!
+//! The two generated files are rewritten on every install; the target directory beside
+//! them is not. That asymmetry is deliberate and load-bearing — [`reset_wrapper`] says why.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -177,7 +181,7 @@ fn install_with(cfg: &KitConfig, paths: &KitPaths, spec: &Spec<'_>) -> KitResult
     let cargo = which::which("cargo").map_err(|_| KitError::CargoNotFound)?;
 
     let wrapper_dir = paths.build_dir(crate_name);
-    remove_dir_if_exists(&wrapper_dir)?;
+    reset_wrapper(&wrapper_dir)?;
     std::fs::create_dir_all(wrapper_dir.join("src"))?;
 
     let stem = cfg.lib_stem(crate_name);
@@ -253,6 +257,47 @@ fn install_with(cfg: &KitConfig, paths: &KitPaths, spec: &Spec<'_>) -> KitResult
     })
 }
 
+// ---- the wrapper directory ------------------------------------------------
+
+/// Clears the wrapper project, keeping the cargo target directory inside it.
+///
+/// The wrapper is regenerated from scratch on every install, so its two generated files must
+/// never survive from a previous run — a `Cargo.toml` still naming a plugin that has since been
+/// removed would be built instead of the one being installed. What must survive is `target/`:
+/// cargo puts its build cache there (the wrapper is its own single-element workspace, so there
+/// is no workspace above it to place one), and deleting it makes every install recompile the
+/// whole plugin stack — the plugin, the contract crate and every dependency of both. That is
+/// the difference between an update that finishes in milliseconds and one that takes minutes.
+///
+/// So this removes the wrapper's *source*, not the wrapper: the files `wrapper::write` is about
+/// to overwrite, plus anything a previous version of the kit might have left in an unexpected
+/// place. `target` is the only thing named, because it is the only thing that has to be.
+fn reset_wrapper(dir: &Path) -> KitResult<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() == "target" {
+            continue;
+        }
+        remove_entry(&entry.path())?;
+    }
+
+    Ok(())
+}
+
+/// Removes one file or directory tree.
+fn remove_entry(path: &Path) -> KitResult<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 // ---- wrapper generation ---------------------------------------------------
 //
 // The generated files live in the private `wrapper` module, because `crate::pack` builds the
@@ -309,4 +354,46 @@ fn probe_contract_requirement(
         spec.crate_name(),
         &cfg.contract_crate,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of [`reset_wrapper`]: the generated files go, cargo's cache stays.
+    ///
+    /// If `target/` is removed here, every install — `plugin add` as much as `plugin update` —
+    /// recompiles the plugin and its entire dependency graph from scratch. That failure is
+    /// invisible: the install still succeeds, it is just slow. So it is asserted here, where it
+    /// costs a second, instead of being noticed as "why does this take minutes again".
+    #[test]
+    fn reset_wrapper_keeps_the_target_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("myapp-plugin-foo");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target").join("release")).unwrap();
+
+        std::fs::write(dir.join("Cargo.toml"), "# stale\n").unwrap();
+        std::fs::write(dir.join("src").join("lib.rs"), "// stale\n").unwrap();
+        std::fs::write(dir.join("target").join("release").join("cached"), "x").unwrap();
+
+        reset_wrapper(&dir).unwrap();
+
+        assert!(
+            !dir.join("Cargo.toml").exists() && !dir.join("src").exists(),
+            "a stale generated file must not survive into the next build"
+        );
+        assert!(
+            dir.join("target").join("release").join("cached").is_file(),
+            "cargo's cache is what makes an update cheap"
+        );
+    }
+
+    /// A wrapper directory that is not there yet is not an error: a first install creates it.
+    #[test]
+    fn reset_wrapper_accepts_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        reset_wrapper(&tmp.path().join("never-built")).unwrap();
+    }
 }
