@@ -112,6 +112,12 @@ jobs:
       - uses: cargo-bins/cargo-binstall@v1.25.1
 
       - name: Install plugin-asset
+        # The automatic token: four matrix legs share a runner's IP and the unauthenticated GitHub
+        # API limit is small (403, then binstall retries until it times out). binstall reads
+        # `GITHUB_TOKEN`, `gh` reads `GH_TOKEN`; both are the same token.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: cargo binstall crate-plugin-kit --version ${{ env.PLUGIN_ASSET_VERSION }} --bin plugin-asset --no-confirm --disable-strategies compile
 
       # `--target-dir` keeps its default (`<checkout>/target`), which is what the cache action
@@ -119,6 +125,9 @@ jobs:
       # write anything if the version in `pmpx-plugin.toml` and the one in `Cargo.toml`
       # disagree, and it `dlopen`s the result before handing it over.
       - name: Build the assets
+        # `shell: bash` on every runner, like the rest of this file: Windows runners default to
+        # PowerShell, and this step is written in bash.
+        shell: bash
         run: |
           set -euo pipefail
           args=(--id "${{ inputs.id }}" --target "${{ matrix.target }}" --out-dir dist)
