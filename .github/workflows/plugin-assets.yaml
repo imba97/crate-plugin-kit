@@ -43,14 +43,14 @@ on:
   workflow_call:
     inputs:
       id:
-        description: Host application id the assets are named for -- the same string the host passes to KitConfig::new. The manifest name, crate prefix, lib stem and entry symbol are all derived from it.
+        description: Host application id the assets are named for -- the same string the host passes to KitConfig::new. The manifest name, crate prefix and lib stem are derived from it, and so is the entry symbol unless `entry_symbol` overrides it.
         # Required, and deliberately without a default: this workflow has no host of its own.
         required: true
+        type: string
       entry_symbol:
         description: Entry symbol the finished cdylib must export, when the host's symbol is not the derived `{id}_plugin_entry_v1`. Passed straight to `plugin-asset --entry-symbol`.
         # Optional on purpose: a host whose symbol follows the derivation says nothing here.
         required: false
-        type: string
         type: string
 
 permissions:
