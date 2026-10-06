@@ -1,6 +1,6 @@
 //! The `plugin-asset` command line: what can be asked for, and what happens then.
 //!
-//! Hand-rolled rather than pulled in: this is seven flags, and the crate's dependency
+//! Hand-rolled rather than pulled in: this is eight flags, and the crate's dependency
 //! list is part of its interface — every plugin installation compiles it.
 
 use std::path::{Path, PathBuf};
@@ -25,6 +25,9 @@ Options:
   --out-dir <DIR>        Where the two assets go. Default: ./dist
   --target <TRIPLE>      Target triple to build for. Default: this machine's
   --target-dir <DIR>     cargo's build directory. Default: <plugin dir>/target
+  --entry-symbol <SYM>   Entry symbol the finished cdylib must export. Default:
+                         derived from the id, `{id}_plugin_entry_v1` -- a host
+                         whose symbol does not follow that derivation passes it.
   --no-verify            Skip the `dlopen` check on the finished cdylib
   -h, --help             Print this help
   -V, --version          Print the version
@@ -51,6 +54,7 @@ pub(super) struct Args {
     out_dir: PathBuf,
     target: Option<String>,
     target_dir: Option<PathBuf>,
+    entry_symbol: Option<String>,
     verify: bool,
 }
 
@@ -60,6 +64,11 @@ pub(super) fn run(args: &Args) -> Result<(), String> {
     if let Some(target) = &args.target {
         // The same override install uses; here it also decides the asset's file name.
         cfg.target_triple = Some(target.clone());
+    }
+    if let Some(symbol) = &args.entry_symbol {
+        // The host's real symbol. The derived default is `{snake}_plugin_entry_v1`, which is
+        // right for a host whose ABI major has never changed; one that has passes this.
+        cfg.entry_symbol = symbol.clone().into_bytes();
     }
 
     // The plugin directory is where its Cargo.toml is; `.` for a bare file name.
@@ -88,6 +97,7 @@ pub(super) fn parse(argv: &[String]) -> Result<Action, String> {
     let mut out_dir = PathBuf::from("dist");
     let mut target: Option<String> = None;
     let mut target_dir: Option<PathBuf> = None;
+    let mut entry_symbol: Option<String> = None;
     let mut verify = true;
 
     let mut args = argv.iter();
@@ -107,6 +117,7 @@ pub(super) fn parse(argv: &[String]) -> Result<Action, String> {
             "--out-dir" => out_dir = PathBuf::from(value(flag, inline, &mut args)?),
             "--target" => target = Some(value(flag, inline, &mut args)?),
             "--target-dir" => target_dir = Some(PathBuf::from(value(flag, inline, &mut args)?)),
+            "--entry-symbol" => entry_symbol = Some(value(flag, inline, &mut args)?),
             "--no-verify" => verify = false,
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -126,6 +137,7 @@ pub(super) fn parse(argv: &[String]) -> Result<Action, String> {
         out_dir,
         target,
         target_dir,
+        entry_symbol,
         verify,
     }))
 }
@@ -185,6 +197,10 @@ mod tests {
         assert_eq!(args.target, None);
         assert_eq!(args.target_dir, None);
         assert!(args.verify, "the dlopen check is on unless asked otherwise");
+        assert!(
+            args.entry_symbol.is_none(),
+            "the symbol default is the tool's, derived from the id"
+        );
     }
 
     #[test]
@@ -200,6 +216,8 @@ mod tests {
             "aarch64-apple-darwin",
             "--target-dir",
             "cache",
+            "--entry-symbol",
+            "pmpx_plugin_entry_v3",
             "--no-verify",
         ]);
 
@@ -207,6 +225,7 @@ mod tests {
         assert_eq!(args.out_dir, PathBuf::from("release-assets"));
         assert_eq!(args.target.as_deref(), Some("aarch64-apple-darwin"));
         assert_eq!(args.target_dir, Some(PathBuf::from("cache")));
+        assert_eq!(args.entry_symbol.as_deref(), Some("pmpx_plugin_entry_v3"));
         assert!(!args.verify);
     }
 

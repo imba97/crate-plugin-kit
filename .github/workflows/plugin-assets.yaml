@@ -46,6 +46,11 @@ on:
         description: Host application id the assets are named for -- the same string the host passes to KitConfig::new. The manifest name, crate prefix, lib stem and entry symbol are all derived from it.
         # Required, and deliberately without a default: this workflow has no host of its own.
         required: true
+      entry_symbol:
+        description: Entry symbol the finished cdylib must export, when the host's symbol is not the derived `{id}_plugin_entry_v1`. Passed straight to `plugin-asset --entry-symbol`.
+        # Optional on purpose: a host whose symbol follows the derivation says nothing here.
+        required: false
+        type: string
         type: string
 
 permissions:
@@ -55,7 +60,7 @@ env:
   # The single place this version appears in the whole ecosystem. Bumping it is a deliberate
   # act: it decides which wrapper generation future assets are built with, for every plugin
   # that calls this workflow.
-  PLUGIN_ASSET_VERSION: "0.2.1"
+  PLUGIN_ASSET_VERSION: "0.3.1"
 
 jobs:
   assets:
@@ -114,7 +119,14 @@ jobs:
       # write anything if the version in `pmpx-plugin.toml` and the one in `Cargo.toml`
       # disagree, and it `dlopen`s the result before handing it over.
       - name: Build the assets
-        run: plugin-asset --id ${{ inputs.id }} --target ${{ matrix.target }} --out-dir dist
+        run: |
+          set -euo pipefail
+          args=(--id "${{ inputs.id }}" --target "${{ matrix.target }}" --out-dir dist)
+          # Only when the caller named one: the tool's default is derived from the id.
+          if [ -n "${{ inputs.entry_symbol }}" ]; then
+            args+=(--entry-symbol "${{ inputs.entry_symbol }}")
+          fi
+          plugin-asset "${args[@]}"
 
       # The release object is created here -- the crates.io job does not need one. Every matrix
       # leg tries, so "already exists" and losing that race are not failures; only the upload
