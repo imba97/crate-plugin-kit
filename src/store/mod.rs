@@ -169,7 +169,7 @@ impl<T> CratePluginKit<T> {
                 version: installed.version.clone(),
                 abi,
                 root: installed.dir.clone(),
-                source: installed.source,
+                source: installed.source.clone(),
                 installed_at: now_unix(),
             },
         );

@@ -42,7 +42,10 @@ impl<T> CratePluginKit<T> {
                 continue;
             };
 
-            let source = idx.get(&crate_name).map(|e| e.source).unwrap_or_default();
+            let source = idx
+                .get(&crate_name)
+                .map(|e| e.source.clone())
+                .unwrap_or_default();
 
             // Broken apart rather than cloned: the summary and the host's own sections
             // are all this read is for, so nothing is copied on the way out.

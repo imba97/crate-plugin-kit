@@ -47,6 +47,88 @@ mod metadata;
 
 use metadata::cargo_metadata;
 
+/// Where the plugin crate being installed comes from.
+///
+/// The two shapes differ in exactly three places — the dependency the probe asks cargo
+/// about, the source the wrapper is written for, and what the install record says
+/// afterwards. Everything else (the wrapper, the build, finding the artifact, landing the
+/// cdylib and the manifest) is [`install_with`], so an install from a directory cannot
+/// drift from an install from crates.io.
+enum Spec<'a> {
+    /// A published crate, pinned exactly: the version recorded must be the version built.
+    Registry {
+        crate_name: &'a str,
+        version: &'a str,
+    },
+    /// A checkout on this machine, with its manifest beside its `Cargo.toml`.
+    Local {
+        crate_name: &'a str,
+        version: &'a str,
+        dir: &'a Path,
+    },
+}
+
+impl Spec<'_> {
+    fn crate_name(&self) -> &str {
+        match self {
+            Spec::Registry { crate_name, .. } | Spec::Local { crate_name, .. } => crate_name,
+        }
+    }
+
+    fn version(&self) -> &str {
+        match self {
+            Spec::Registry { version, .. } | Spec::Local { version, .. } => version,
+        }
+    }
+
+    /// The dependency line the probe manifest needs to reach the plugin crate.
+    ///
+    /// A literal TOML string for the path: a Windows path is full of backslashes, and a
+    /// basic string would read them as escapes.
+    fn probe_dependency(&self) -> String {
+        match self {
+            Spec::Registry {
+                crate_name,
+                version,
+            } => format!("{crate_name} = \"={version}\""),
+            Spec::Local {
+                crate_name, dir, ..
+            } => {
+                format!("{crate_name} = {{ path = '{}' }}", dir.display())
+            }
+        }
+    }
+
+    fn plugin_source(&self) -> PluginSource<'_> {
+        match self {
+            Spec::Registry { version, .. } => PluginSource::Registry { version },
+            Spec::Local { dir, .. } => PluginSource::Path { dir },
+        }
+    }
+
+    /// How the install record describes it. A published crate built on this machine is
+    /// `BuildHost`; a checkout is `Local`, with the directory kept for `update`.
+    fn install_source(&self) -> InstallSource {
+        match self {
+            Spec::Registry { .. } => InstallSource::BuildHost,
+            Spec::Local { dir, .. } => InstallSource::Local {
+                path: dir.to_path_buf(),
+            },
+        }
+    }
+
+    /// The directory the plugin's manifest is copied from.
+    ///
+    /// A checkout knows it; a published crate has to be asked of cargo, which resolved it
+    /// into the registry source directory.
+    fn manifest_source<'a>(&'a self, from_cargo: Option<&'a Path>) -> Option<&'a Path> {
+        match self {
+            Spec::Local { dir, .. } => Some(dir),
+            Spec::Registry { .. } => from_cargo,
+        }
+    }
+}
+
 /// Installs a plugin through build-host.
 ///
 /// `version` must be a concrete version number (the caller looks up the latest one on
@@ -57,6 +139,41 @@ pub fn install(
     crate_name: &str,
     version: &str,
 ) -> KitResult<Installed> {
+    install_with(
+        cfg,
+        paths,
+        &Spec::Registry {
+            crate_name,
+            version,
+        },
+    )
+}
+
+/// Installs a plugin from a checkout on this machine.
+///
+/// `crate_name` and `version` are what the checkout's own manifest declares; the build is
+/// the same one a published plugin gets.
+pub fn install_from_path(
+    cfg: &KitConfig,
+    paths: &KitPaths,
+    crate_name: &str,
+    version: &str,
+    dir: &Path,
+) -> KitResult<Installed> {
+    install_with(
+        cfg,
+        paths,
+        &Spec::Local {
+            crate_name,
+            version,
+            dir,
+        },
+    )
+}
+
+/// The install itself: one implementation for both sources.
+fn install_with(cfg: &KitConfig, paths: &KitPaths, spec: &Spec<'_>) -> KitResult<Installed> {
+    let crate_name = spec.crate_name();
     let cargo = which::which("cargo").map_err(|_| KitError::CargoNotFound)?;
 
     let wrapper_dir = paths.build_dir(crate_name);
@@ -69,7 +186,7 @@ pub fn install(
     // for exactly the same thing. Getting this wrong is not cosmetic: the private `wrapper`
     // module explains what two disagreeing requirements do to the build.
     let probe_dir = paths.build_dir(&format!("{crate_name}-probe"));
-    let contract = probe_contract_requirement(cfg, &cargo, &probe_dir, crate_name, version)?;
+    let contract = probe_contract_requirement(cfg, &cargo, &probe_dir, spec)?;
     remove_dir_if_exists(&probe_dir)?;
 
     wrapper::write(
@@ -77,7 +194,7 @@ pub fn install(
         &wrapper_dir,
         crate_name,
         &stem,
-        PluginSource::Registry { version },
+        spec.plugin_source(),
         contract.as_ref(),
     )?;
 
@@ -125,14 +242,14 @@ pub fn install(
     );
     std::fs::copy(&built, &dest_lib)?;
 
-    copy_manifest(cfg, &plugin_dir, plugin_src)?;
+    copy_manifest(cfg, &plugin_dir, spec.manifest_source(plugin_src))?;
 
     Ok(Installed {
         crate_name: crate_name.to_string(),
-        version: version.to_string(),
+        version: spec.version().to_string(),
         dir: plugin_dir,
         library: dest_lib,
-        source: InstallSource::BuildHost,
+        source: spec.install_source(),
     })
 }
 
@@ -172,8 +289,7 @@ fn probe_contract_requirement(
     cfg: &KitConfig,
     cargo: &Path,
     dir: &Path,
-    crate_name: &str,
-    version: &str,
+    spec: &Spec<'_>,
 ) -> KitResult<Option<ContractDep>> {
     std::fs::create_dir_all(dir.join("src"))?;
     // Its own workspace, so the wrapper's Cargo.toml above it does not claim it.
@@ -181,11 +297,16 @@ fn probe_contract_requirement(
         dir.join("Cargo.toml"),
         format!(
             "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
-             [workspace]\n\n[dependencies]\n{crate_name} = \"={version}\"\n"
+             [workspace]\n\n[dependencies]\n{}\n",
+            spec.probe_dependency()
         ),
     )?;
     std::fs::write(dir.join("src").join("lib.rs"), "")?;
 
     let v = cargo_metadata_json(cargo, &dir.join("Cargo.toml"))?;
-    Ok(declared_contract_dep(&v, crate_name, &cfg.contract_crate))
+    Ok(declared_contract_dep(
+        &v,
+        spec.crate_name(),
+        &cfg.contract_crate,
+    ))
 }

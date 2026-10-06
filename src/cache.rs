@@ -64,7 +64,7 @@ pub struct IndexEntry {
 }
 
 /// How a plugin got installed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstallSource {
     /// Prebuilt artifact downloaded from GitHub Releases.
@@ -72,6 +72,15 @@ pub enum InstallSource {
     /// Compiled locally by `cargo build` (the default path).
     #[default]
     BuildHost,
+    /// Compiled from a checkout on this machine.
+    ///
+    /// The path is kept because it is what `update` rebuilds from: a plugin that was
+    /// installed from a directory has no registry to look up, and rebuilding the same
+    /// directory is what updating it means.
+    Local {
+        /// The directory that was installed from.
+        path: PathBuf,
+    },
 }
 
 /// Current Unix seconds. Returns 0 when the system time is unavailable — a wrong

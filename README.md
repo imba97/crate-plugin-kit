@@ -27,6 +27,9 @@ $ # crate-plugin-kit does this instead:
 
 - 🔌 **Runtime loading, zero compile-time coupling** — plugins are `cdylib`s, `dlopen`ed on
   demand. Nothing is linked into your binary.
+- 🧪 **Install from a local checkout** — `install_from_path(".")` builds and lands the same two
+  files a published plugin gets, so a plugin author can use what they are working on before
+  publishing it; `update` rebuilds that directory.
 - 📦 **Install straight from crates.io** — builds locally through `cargo`, so whatever registry
   or mirror you already configured just works. Prebuilt assets are an optional accelerator,
   never a requirement.
