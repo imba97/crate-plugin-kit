@@ -136,6 +136,11 @@ let kit = CratePluginKit::<MyHostEntry>::new(cfg)?;
 kit.install("foo", None)?;                    // installs myapp-plugin-foo
 for info in kit.list()? {
     println!("{} {}", info.name, info.version);
+
+    // Your own sections came along with the summary — `[detect]`, `[context]`, whatever
+    // your host defines. The kit carries them through; reading them is your business,
+    // and you do not have to open the manifest a second time to get them.
+    let my_sections = info.extra.get("detect");
 }
 
 let plugin = kit.load("myapp-plugin-foo")?;   // *const MyHostEntry

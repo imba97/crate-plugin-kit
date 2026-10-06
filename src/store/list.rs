@@ -44,14 +44,19 @@ impl<T> CratePluginKit<T> {
 
             let source = idx.get(&crate_name).map(|e| e.source).unwrap_or_default();
 
+            // Broken apart rather than cloned: the summary and the host's own sections
+            // are all this read is for, so nothing is copied on the way out.
+            let PluginManifest { plugin, extra, .. } = manifest;
+
             out.push(PluginInfo {
-                name: manifest.plugin.name.clone(),
+                name: plugin.name,
                 crate_name,
-                version: manifest.plugin.version.clone(),
-                family: manifest.plugin.family.clone(),
-                abi: manifest.plugin.abi,
+                version: plugin.version,
+                family: plugin.family,
+                abi: plugin.abi,
                 dir: entry.path(),
                 source,
+                extra,
             });
         }
 
@@ -91,6 +96,35 @@ mod tests {
     use super::super::tests::{kit, place_plugin};
     use crate::cache::InstallSource;
     use crate::error::KitError;
+
+    /// A host's own sections come back with the summary.
+    ///
+    /// This is what saves a host a second read of the manifest: it asked the kit what is
+    /// installed, so the kit hands over the sections it read on the way -- `[detect]` here,
+    /// which the kit itself has no opinion about.
+    #[test]
+    fn the_hosts_own_sections_come_back_with_the_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        place_plugin(&root, "myapp-plugin-foo");
+
+        let k = kit(&root);
+        let infos = k.list().unwrap();
+
+        assert_eq!(infos.len(), 1);
+        let strong = infos[0]
+            .extra
+            .get("detect")
+            .and_then(|detect| detect.get("strong"))
+            .and_then(|strong| strong.as_array())
+            .expect("the [detect] section has to survive the listing");
+        assert_eq!(strong.len(), 1);
+        assert_eq!(strong[0].as_str(), Some("fake.lock"));
+
+        assert_eq!(infos[0].name, "foo");
+        assert_eq!(infos[0].family.as_deref(), Some("node"));
+        assert_eq!(infos[0].abi, Some(1));
+    }
 
     #[test]
     fn a_fresh_store_lists_nothing() {

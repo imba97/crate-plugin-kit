@@ -42,6 +42,11 @@ pub(super) mod list;
 pub(super) mod load;
 
 /// An overview of one installed plugin.
+///
+/// This is what the kit read from the manifest while listing the plugin directory. It
+/// carries the fields the kit itself understands, plus [`PluginInfo::extra`] — every
+/// other section, exactly as written — so a host can read its own sections from the
+/// same read instead of opening the manifest a second time.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     /// Plugin's self-declared name (the manifest's `plugin.name`).
@@ -58,6 +63,14 @@ pub struct PluginInfo {
     pub dir: PathBuf,
     /// How it got installed.
     pub source: InstallSource,
+
+    /// Every top-level section the kit does not interpret, verbatim.
+    ///
+    /// A host's own sections live here: `[detect]`, `[context]`, and anything else it
+    /// defines. The kit neither reads nor validates them — it only carries them through,
+    /// which is what lets a host keep its manifest vocabulary while the kit stays
+    /// host-agnostic.
+    pub extra: toml::Table,
 }
 
 /// Generic plugin management library.
